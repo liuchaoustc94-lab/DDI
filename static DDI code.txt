@@ -1,0 +1,2810 @@
+library(shiny)
+library(dplyr)
+library(tibble)
+library(htmltools)
+
+`%||%` <- function(x, y) {
+  if (is.null(x) || length(x) == 0 || (length(x) == 1 && is.na(x))) y else x
+}
+
+fmt_txt_num <- function(x, digits = 3) {
+  if (is.na(x)) "---" else formatC(x, format = "f", digits = digits)
+}
+
+fmt_txt_trim <- function(x, digits = 3) {
+  if (is.na(x)) return("---")
+  sub("\\.?0+$", "", formatC(x, format = "f", digits = digits))
+}
+
+is_iv_route <- function(route) {
+  identical(route %||% "Oral", "IV")
+}
+
+calc_cmax_uM <- function(c_ng_ml, mw) {
+  if (is.na(c_ng_ml) || is.na(mw) || mw <= 0) return(NA_real_)
+  c_ng_ml / mw
+}
+
+calc_unbound <- function(c_uM, fu_p) {
+  if (is.na(c_uM) || is.na(fu_p)) return(NA_real_)
+  c_uM * fu_p
+}
+
+calc_iin_max_total <- function(cmax_uM, dose_mg, fa, fg, ka_min, qh_L_h, mw, route = "Oral") {
+  if (is_iv_route(route)) return(cmax_uM)
+  if (any(is.na(c(cmax_uM, dose_mg, fa, fg, ka_min, qh_L_h, mw))) || mw <= 0 || qh_L_h <= 0) return(NA_real_)
+  dose_umol <- dose_mg * 1000 / mw
+  ka_h <- ka_min * 60
+  cmax_uM + (fa * fg * dose_umol * ka_h) / qh_L_h
+}
+
+calc_iin_max_unbound <- function(cmax_uM, dose_mg, fa, fg, ka_min, qh_L_h, mw, fu_p, route = "Oral") {
+  x <- calc_iin_max_total(cmax_uM, dose_mg, fa, fg, ka_min, qh_L_h, mw, route = route)
+  if (is.na(x) || is.na(fu_p)) return(NA_real_)
+  x * fu_p
+}
+
+calc_igut_uM <- function(dose_mg, mw, gut_vol_L = 0.25, route = "Oral") {
+  if (is_iv_route(route)) return(NA_real_)
+  if (any(is.na(c(dose_mg, mw, gut_vol_L))) || mw <= 0 || gut_vol_L <= 0) return(NA_real_)
+  dose_umol <- dose_mg * 1000 / mw
+  dose_umol / gut_vol_L
+}
+
+calc_i_ent_uM <- function(dose_mg, mw, ka_min, fa, qent_ml_min, route = "Oral") {
+  if (is_iv_route(route)) return(NA_real_)
+  if (any(is.na(c(dose_mg, mw, ka_min, fa, qent_ml_min))) || mw <= 0 || qent_ml_min <= 0) return(NA_real_)
+  dose_umol <- dose_mg * 1000 / mw
+  (ka_min * fa * dose_umol / qent_ml_min) * 1000
+}
+
+calc_ih_total_uM <- function(cmax_total_uM, dose_mg, mw, ka_min, fa, fg, qh_ml_min, rb, route = "Oral") {
+  if (is_iv_route(route)) return(cmax_total_uM)
+  if (any(is.na(c(cmax_total_uM, dose_mg, mw, ka_min, fa, fg, qh_ml_min, rb))) || mw <= 0 || qh_ml_min <= 0 || rb <= 0) return(NA_real_)
+  dose_umol <- dose_mg * 1000 / mw
+  cmax_total_uM + ((ka_min * fa * fg * dose_umol / qh_ml_min) / rb) * 1000
+}
+
+calc_ih_unbound_uM <- function(cmax_total_uM, dose_mg, mw, ka_min, fa, fg, qh_ml_min, rb, fu_p, route = "Oral") {
+  x <- calc_ih_total_uM(cmax_total_uM, dose_mg, mw, ka_min, fa, fg, qh_ml_min, rb, route = route)
+  if (is.na(x) || is.na(fu_p)) return(NA_real_)
+  fu_p * x
+}
+
+calc_r1 <- function(I, Ki) {
+  if (any(is.na(c(I, Ki))) || Ki <= 0) return(NA_real_)
+  1 + I / Ki
+}
+
+calc_tdi_auc_ratio <- function(I, KI, kinact_min, kdeg_min) {
+  if (any(is.na(c(I, KI, kinact_min, kdeg_min))) || KI <= 0 || kdeg_min <= 0) return(NA_real_)
+  1 + (kinact_min * I) / (kdeg_min * (KI + I))
+}
+
+calc_induction_ratio <- function(I, Emax, EC50) {
+  if (any(is.na(c(I, Emax, EC50))) || EC50 <= 0) return(NA_real_)
+  1 / (1 + Emax * I / (EC50 + I))
+}
+
+calc_cheng_prusoff_ki <- function(ic50, s, km) {
+  if (any(is.na(c(ic50, s, km))) || km <= 0) return(NA_real_)
+  ic50 / (1 + s / km)
+}
+
+calc_transporter_ratio <- function(I, Ki) {
+  if (any(is.na(c(I, Ki))) || Ki <= 0) return(NA_real_)
+  I / Ki
+}
+
+combine_static_terms <- function(...) {
+  vals <- c(...)
+  vals <- vals[!is.na(vals)]
+  if (!length(vals)) return(NA_real_)
+  prod(vals)
+}
+
+calc_hepatic_net_aucr <- function(effect_term, fm) {
+  if (is.na(effect_term) || is.na(fm)) return(NA_real_)
+  1 / (effect_term * fm + (1 - fm))
+}
+
+calc_gut_net_aucr <- function(effect_term, fg) {
+  if (is.na(effect_term) || is.na(fg)) return(NA_real_)
+  1 / (effect_term * (1 - fg) + fg)
+}
+
+combine_aucr_terms <- function(liver_aucr, gut_aucr) {
+  if (is.na(liver_aucr) && is.na(gut_aucr)) return(NA_real_)
+  if (is.na(liver_aucr)) return(gut_aucr)
+  if (is.na(gut_aucr)) return(liver_aucr)
+  liver_aucr * gut_aucr
+}
+
+pk_summary <- function(x) {
+  cmax_total_uM <- calc_cmax_uM(x$cmax_ng_ml, x$mw_calc)
+  cmax_unbound_uM <- calc_unbound(cmax_total_uM, x$fu_p)
+  iin_max_total_uM <- calc_iin_max_total(
+    cmax_uM = cmax_total_uM,
+    dose_mg = x$dose_mg,
+    fa = x$fa,
+    fg = x$fg,
+    ka_min = x$ka_min,
+    qh_L_h = x$qh_L_h,
+    mw = x$mw_calc,
+    route = x$route %||% "Oral"
+  )
+  iin_max_unbound_uM <- calc_iin_max_unbound(
+    cmax_uM = cmax_total_uM,
+    dose_mg = x$dose_mg,
+    fa = x$fa,
+    fg = x$fg,
+    ka_min = x$ka_min,
+    qh_L_h = x$qh_L_h,
+    mw = x$mw_calc,
+    fu_p = x$fu_p,
+    route = x$route %||% "Oral"
+  )
+  igut_uM <- calc_igut_uM(
+    dose_mg = x$dose_mg,
+    mw = x$mw_calc,
+    gut_vol_L = x$gut_vol_L %||% 0.25,
+    route = x$route %||% "Oral"
+  )
+  
+  list(
+    cmax_total_uM = cmax_total_uM,
+    cmax_unbound_uM = cmax_unbound_uM,
+    iin_max_total_uM = iin_max_total_uM,
+    iin_max_unbound_uM = iin_max_unbound_uM,
+    igut_uM = igut_uM
+  )
+}
+
+atomic_weights <- c(
+  H = 1.00794,
+  He = 4.002602,
+  Li = 6.941,
+  Be = 9.012182,
+  B = 10.811,
+  C = 12.0107,
+  N = 14.0067,
+  O = 15.9994,
+  F = 18.9984032,
+  Ne = 20.1797,
+  Na = 22.98976928,
+  Mg = 24.3050,
+  Al = 26.9815386,
+  Si = 28.0855,
+  P = 30.973762,
+  S = 32.065,
+  Cl = 35.453,
+  Ar = 39.948,
+  K = 39.0983,
+  Ca = 40.078,
+  Fe = 55.845,
+  Cu = 63.546,
+  Zn = 65.38,
+  Br = 79.904,
+  Ag = 107.8682,
+  I = 126.90447
+)
+
+parse_formula_counts <- function(formula) {
+  if (is.null(formula) || !nzchar(trimws(formula))) return(NULL)
+  
+  s <- gsub("\\s+", "", formula)
+  n <- nchar(s)
+  pos <- 1
+  
+  parse_number <- function() {
+    if (pos > n) return(1)
+    rest <- substr(s, pos, n)
+    m <- regexpr("^[0-9]+", rest, perl = TRUE)
+    if (m[1] == -1) return(1)
+    len <- attr(m, "match.length")
+    val <- as.numeric(substr(rest, 1, len))
+    pos <<- pos + len
+    val
+  }
+  
+  parse_element <- function() {
+    if (pos > n) return(NULL)
+    rest <- substr(s, pos, n)
+    m <- regexpr("^[A-Z][a-z]?", rest, perl = TRUE)
+    if (m[1] == -1) return(NULL)
+    len <- attr(m, "match.length")
+    el <- substr(rest, 1, len)
+    pos <<- pos + len
+    el
+  }
+  
+  merge_counts <- function(a, b, mult = 1) {
+    for (nm in names(b)) {
+      a[[nm]] <- (a[[nm]] %||% 0) + b[[nm]] * mult
+    }
+    a
+  }
+  
+  parse_group <- function(stop_on_right_paren = FALSE) {
+    counts <- list()
+    
+    while (pos <= n) {
+      ch <- substr(s, pos, pos)
+      
+      if (ch == "(") {
+        pos <<- pos + 1
+        inner <- parse_group(stop_on_right_paren = TRUE)
+        if (is.null(inner)) return(NULL)
+        mult <- parse_number()
+        counts <- merge_counts(counts, inner, mult)
+      } else if (ch == ")") {
+        if (!stop_on_right_paren) return(NULL)
+        pos <<- pos + 1
+        return(counts)
+      } else {
+        el <- parse_element()
+        if (is.null(el)) return(NULL)
+        mult <- parse_number()
+        counts[[el]] <- (counts[[el]] %||% 0) + mult
+      }
+    }
+    
+    if (stop_on_right_paren) return(NULL)
+    counts
+  }
+  
+  counts <- parse_group(FALSE)
+  if (is.null(counts)) return(NULL)
+  if (pos <= n) return(NULL)
+  counts
+}
+
+calc_mw_from_formula <- function(formula) {
+  counts <- parse_formula_counts(formula)
+  if (is.null(counts)) return(NA_real_)
+  
+  total <- 0
+  for (el in names(counts)) {
+    if (!(el %in% names(atomic_weights))) return(NA_real_)
+    total <- total + atomic_weights[[el]] * counts[[el]]
+  }
+  total
+}
+
+default_cyp <- tibble(
+  enzyme = c("CYP1A2", "CYP2A6", "CYP2B6", "CYP2C8", "CYP2C9", "CYP2C19", "CYP2D6", "CYP2E1", "CYP3A4 (midazolam)", "CYP3A4 (testosterone)"),
+  id_base = c("CYP1A2", "CYP2A6", "CYP2B6", "CYP2C8", "CYP2C9", "CYP2C19", "CYP2D6", "CYP2E1", "CYP3A4_midazolam", "CYP3A4_testosterone"),
+  Ki_uM = c(NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+  Ki_ref = c("", "", "", "", "IC50 reported as > 10, > 10 fro", "", "IC50 reported as > 10, > 10 fro", "", "IC50 reported as > 10 from stu", ""),
+  KI_uM = c(NA, NA, NA, NA, NA, NA, NA, NA, 36.8, NA),
+  KI_ref = c("", "", "", "", "", "", "", "", "From study(ies) E-53540-10:", ""),
+  kinact_min = c(NA, NA, NA, NA, NA, NA, NA, NA, 0.011, NA),
+  kinact_ref = c("", "", "", "", "", "", "", "", "'PKS Enzyme Inhibition' assay", ""),
+  Emax = c(4.0, NA, 3.8, 3.0, 3.3, NA, NA, NA, 26.7, NA),
+  Emax_ref = c("Emax from study 1300942", "", "Emax from study 1300942", "Emax from study 1900152", "Emax from studies 1900152, :", "Emax reported as < 2 from stu", "", "", "Emax from study 1300942", ""),
+  EC50_uM = c(NA, NA, 3.0, NA, 2.2, NA, NA, NA, 1.7, NA),
+  EC50_ref = c("EC50 reported as > 10 from stu", "", "EC50 from study 1300942", "EC50 reported as > 25 from stu", "EC50 from studies 1900152, 1", "EC50 reported as > 25 from stu", "", "", "EC50 from study 1300942", ""),
+  d_scalar = c(NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+  d_ref = c("", "", "", "", "", "", "", "", "", "")
+)
+
+default_optional <- tibble(
+  enzyme_label = c("Enzyme 1", "Enzyme 2", "Enzyme 3")
+)
+
+default_optional_tr <- tibble(
+  transporter_label = c("Transporter 1", "Transporter 2", "Transporter 3"),
+  site = c("systemic_unbound", "systemic_unbound", "systemic_unbound"),
+  threshold = c(0.1, 0.1, 0.1)
+)
+
+default_tr <- tibble(
+  transporter = c("P-gp", "BCRP", "OATP1B1", "OATP1B3", "OAT1", "OAT3", "OCT1", "OCT2", "MRP2", "MATE1", "MATE2K", "BSEP", "NTCP"),
+  Ki_uM = c(NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+  IC50_uM = c(0.34, NA, 0.57, 0.84, NA, NA, 0.14, NA, NA, 5.10, NA, 2.35, NA),
+  S_uM = c(2, NA, 1, 1, NA, NA, 10, NA, NA, 1, NA, 1, NA),
+  Km_uM = c(4, NA, 2, 2, NA, NA, 5, NA, NA, 1.5, NA, 1.5, NA),
+  ref = c("", "", "", "", "", "", "", "", "", "", "", "", ""),
+  site = c("gut", "gut", "hepatic_inlet_unbound", "hepatic_inlet_unbound", "systemic_unbound", "systemic_unbound", "hepatic_inlet_unbound", "systemic_unbound", "hepatic_inlet_unbound", "systemic_unbound", "systemic_unbound", "hepatic_inlet_unbound", "hepatic_inlet_unbound")
+)
+
+system_cyp <- tibble(
+  enzyme = c("Qent", "Qh", "CYP1A2", "CYP2A6", "CYP2B6", "CYP2C8", "CYP2C9", "CYP2C19", "CYP2D6", "CYP2E1", "CYP3A4", "CYP3A4 and all other CYPs"),
+  id_base = c("Qent", "Qh", "CYP1A2", "CYP2A6", "CYP2B6", "CYP2C8", "CYP2C9", "CYP2C19", "CYP2D6", "CYP2E1", "CYP3A4", "CYP3A4_all"),
+  param_label = c(
+    "Q<sub>ent</sub> [mL min<sup>-1</sup>]",
+    "Q<sub>h</sub> [mL min<sup>-1</sup>]",
+    "k<sub>deg</sub> [min<sup>-1</sup>]",
+    "k<sub>deg</sub> [min<sup>-1</sup>]",
+    "k<sub>deg</sub> [min<sup>-1</sup>]",
+    "k<sub>deg</sub> [min<sup>-1</sup>]",
+    "k<sub>deg</sub> [min<sup>-1</sup>]",
+    "k<sub>deg</sub> [min<sup>-1</sup>]",
+    "k<sub>deg</sub> [min<sup>-1</sup>]",
+    "k<sub>deg</sub> [min<sup>-1</sup>]",
+    "k<sub>deg</sub> [min<sup>-1</sup>]",
+    "k<sub>deg,gut</sub> [min<sup>-1</sup>]"
+  ),
+  value = c(300, 1617, 0.00030, 0.00030, 0.00036, 0.00053, 0.00011, 0.00044, 0.00023, 0.00030, 0.00032, 0.00048),
+  ref = c("", "", "Liver", "Liver", "Liver", "Liver", "Liver", "Liver", "Liver", "Liver", "Liver", "Intestine"),
+  note = c(
+    "18 L hr per 70 kg as described in ICH M12 2017 DDI guidance",
+    "Use 97 L hr per 70 kg equals 1617 mL min as described in ICH M12 2020 DDI guidance",
+    "Faber and Fuhr, CPT 76(2): 178-184 (2004)",
+    "Assumed",
+    "Renwick et al., DMD 28(10): 1202-1209 (2000)",
+    "Backman et al., DMD 37(12): 2359-2366 (2009)",
+    "Renwick et al., DMD 28(10): 1202-1209 (2000)",
+    "Renwick et al., DMD 28(10): 1202-1209 (2000)",
+    "Liston et al., J Clin Psychopharmacol. 22(2): 169-173 (2003)",
+    "Assumed",
+    "Rowland-Yeo et al., Eur J Pharmaceut Sci. 43(3): 160-173 (2011)",
+    "Greenblatt et al., CPT 74: 121-129 (2003) and Darwich et al., DMD 42(12): 2016-2022 (2014)"
+  )
+)
+
+system_other <- tibble(
+  enzyme = c("CYP1A2", "CYP2A6", "CYP2B6", "CYP2C8", "CYP2C9", "CYP2C19", "CYP2D6", "CYP2E1", "CYP3A4"),
+  id_base = c("fm_CYP1A2", "fm_CYP2A6", "fm_CYP2B6", "fm_CYP2C8", "fm_CYP2C9", "fm_CYP2C19", "fm_CYP2D6", "fm_CYP2E1", "fm_CYP3A4"),
+  value = c(0.8, 1.0, 0.64, 0.71, 0.91, 0.87, 0.9, 1.0, 0.9),
+  ref = c("theoph", "no sub", "efavire", "repagl", "S-War", "omepr", "desipr", "no sub", "midazo"),
+  note = c(
+    "Obach RS (2006) The Utility of in Vitro Cytochrome P450 Inhibition Data in the Prediction of Drug-Drug Interactions. JPET 316:336-348",
+    "",
+    "Fahmi OA et al. (2016) Evaluation of CYP2B6 Induction and Prediction of Clinical Drug-Drug Interactions. Drug Metab Dispos 44(10):1720-30",
+    "Gan J et al. (2010) Repaglinide-gemfibrozil drug interaction. Br J Clin Pharmacol 70:870-880",
+    "Obach RS (2006) The Utility of in Vitro Cytochrome P450 Inhibition Data in the Prediction of Drug-Drug Interactions. JPET 316:336-348",
+    "Obach RS (2006) The Utility of in Vitro Cytochrome P450 Inhibition Data in the Prediction of Drug-Drug Interactions. JPET 316:336-348",
+    "Obach RS (2006) The Utility of in Vitro Cytochrome P450 Inhibition Data in the Prediction of Drug-Drug Interactions. JPET 316:336-348",
+    "",
+    "Einolf HJ et al. (2013) Evaluation of various static and dynamic modeling methods to predict clinical CYP3A induction."
+  )
+)
+
+system_optional <- tibble(
+  enzyme = c("Enzyme 1", "Enzyme 2", "Enzyme 3"),
+  id_base = c("opt1", "opt2", "opt3"),
+  value = c(1, 1, 1),
+  ref = c("no sub", "no sub", "no sub"),
+  note = c("", "", "")
+)
+
+system_fg <- tibble(
+  enzyme = "Fg",
+  id_base = "Fg",
+  value = 0.51,
+  ref = "midazo",
+  note = "Vieira et al. (2013) Evaluation of Various Static In vitro-In vivo Extrapolation Models for Risk Assessment of CYP3A Inhibition Potential."
+)
+
+transporter_site_choices <- c(
+  "Gut ([I]gut)" = "gut",
+  "Hepatic inlet total ([I]in,max)" = "hepatic_inlet",
+  "Hepatic inlet unbound ([I]in,max,u)" = "hepatic_inlet_unbound",
+  "Systemic unbound (Cmax,u)" = "systemic_unbound"
+)
+
+transporter_formula_html <- function(site, route = "Oral") {
+  if (identical(site, "gut")) {
+    if (is_iv_route(route)) {
+      return(HTML("<span class='tr-report-formula'>Not applicable for i.v.</span>"))
+    }
+    return(HTML("<span class='tr-report-formula'>[Dose 250mL] / K<sub>i,u</sub></span>"))
+  }
+  if (identical(site, "hepatic_inlet")) {
+    return(HTML("<span class='tr-report-formula'>I<sub>in,max</sub> / K<sub>i,u</sub></span>"))
+  }
+  if (identical(site, "hepatic_inlet_unbound")) {
+    return(HTML("<span class='tr-report-formula'>I<sub>in,max,u</sub> / K<sub>i,u</sub></span>"))
+  }
+  HTML("<span class='tr-report-formula'>C<sub>max,u</sub> / K<sub>i,u</sub></span>")
+}
+
+transporter_organ_html <- function(site, route = "Oral") {
+  if (identical(site, "gut")) {
+    if (is_iv_route(route)) return("Systemic *")
+    return("Intestine *")
+  }
+  if (identical(site, "hepatic_inlet") || identical(site, "hepatic_inlet_unbound")) {
+    return("Liver")
+  }
+  "Systemic<br><i>(Liver, Kidney, Brain...)</i>"
+}
+
+label_html <- function(x) div(class = "field-label", HTML(x))
+note_html <- function(x) div(class = "field-note", HTML(x))
+reset_button <- function(id) actionButton(id, label = HTML("&#8634;"), class = "reset-btn")
+
+input_num <- function(id, value = NA, step = NULL, min = NULL, max = NULL, width = "100%") {
+  args <- list(inputId = id, label = NULL, value = value, width = width)
+  if (!is.null(step)) args$step <- step
+  if (!is.null(min)) args$min <- min
+  if (!is.null(max)) args$max <- max
+  do.call(numericInput, args)
+}
+
+field_pair_numeric <- function(id, label, value = NA, ref = "", note = NULL, step = NULL, min = NULL, max = NULL) {
+  div(
+    class = "pair-block",
+    div(
+      class = "pair-head",
+      div(class = "pair-left-head", label_html(label)),
+      div(class = "pair-right-head", label_html("Reference")),
+      div()
+    ),
+    div(
+      class = "pair-row",
+      div(class = "pair-left", input_num(id, value = value, step = step, min = min, max = max)),
+      div(class = "pair-right", textInput(paste0(id, "_ref"), NULL, value = ref, width = "100%")),
+      div(class = "pair-reset", reset_button(paste0("reset_", id)))
+    ),
+    if (!is.null(note)) note_html(note)
+  )
+}
+
+field_pair_select <- function(id, label, choices, selected = NULL, ref = "", note = NULL) {
+  div(
+    class = "pair-block",
+    div(
+      class = "pair-head",
+      div(class = "pair-left-head", label_html(label)),
+      div(class = "pair-right-head", label_html("Reference")),
+      div()
+    ),
+    div(
+      class = "pair-row",
+      div(class = "pair-left", selectInput(id, NULL, choices = choices, selected = selected, width = "100%")),
+      div(class = "pair-right", textInput(paste0(id, "_ref"), NULL, value = ref, width = "100%")),
+      div(class = "pair-reset", reset_button(paste0("reset_", id)))
+    ),
+    if (!is.null(note)) note_html(note)
+  )
+}
+
+simple_text_field <- function(id, label, value = "") {
+  div(
+    class = "pair-block",
+    div(class = "pair-head-simple", div(class = "pair-left-head", label_html(label))),
+    div(class = "pair-row-simple", div(class = "pair-left-wide", textInput(id, NULL, value = value, width = "100%")))
+  )
+}
+
+cyp_ki_card <- function(row) {
+  div(
+    class = "enzyme-card",
+    div(class = "enzyme-title", HTML(paste0(row$enzyme, ifelse(grepl("CYP3A4", row$enzyme), "<sup>*</sup>", "")))),
+    field_pair_numeric(
+      id = paste0("ki_", row$id_base),
+      label = "K<sub>i,u</sub> [&mu;M]",
+      value = row$Ki_uM,
+      ref = row$Ki_ref,
+      note = "Ki, IC<sub>50,u</sub>/2 or IC<sub>50</sub>/2 corrected for microsomal protein binding, please define if used Ki, IC<sub>50,u</sub>/2 or IC50/2"
+    )
+  )
+}
+
+cyp_tdi_card <- function(row) {
+  div(
+    class = "tdi-row-card",
+    div(class = "enzyme-title", row$enzyme),
+    div(
+      class = "two-col-grid",
+      field_pair_numeric(
+        id = paste0("KI_", row$id_base),
+        label = "KI<sub>,u</sub> [&mu;M]",
+        value = row$KI_uM,
+        ref = row$KI_ref,
+        note = "unbound KI corrected for microsomal protein binding in the inactivation assay"
+      ),
+      field_pair_numeric(
+        id = paste0("kinact_", row$id_base),
+        label = "k<sub>inact</sub> [min<sup>-1</sup>]",
+        value = row$kinact_min,
+        ref = row$kinact_ref
+      )
+    )
+  )
+}
+
+cyp_ind_card <- function(row) {
+  div(
+    class = "ind-row-card",
+    div(class = "enzyme-title", gsub(" \\(.*\\)", "", row$enzyme)),
+    div(
+      class = "three-col-grid",
+      field_pair_numeric(
+        id = paste0("emax_", row$id_base),
+        label = "E<sub>max</sub> [Fold change]",
+        value = row$Emax,
+        ref = row$Emax_ref,
+        note = "total mRNA increase versus base line"
+      ),
+      field_pair_numeric(
+        id = paste0("ec50_", row$id_base),
+        label = "EC<sub>50</sub> [&mu;M]",
+        value = row$EC50_uM,
+        ref = row$EC50_ref
+      ),
+      field_pair_numeric(
+        id = paste0("dscalar_", row$id_base),
+        label = "<i>d-scalar</i>",
+        value = row$d_scalar,
+        ref = row$d_ref,
+        note = "default to 1, unless otherwise determined experimentally calibration curve"
+      )
+    )
+  )
+}
+
+optional_enzyme_card <- function(label, idx) {
+  div(
+    class = "optional-card",
+    div(class = "enzyme-title", label),
+    div(
+      class = "optional-grid",
+      simple_text_field(paste0("opt_name_", idx), "Enzyme Name", ""),
+      div(
+        class = "pair-block",
+        div(class = "pair-head-simple", div(class = "pair-left-head", label_html("K<sub>i,u</sub> [&mu;M]"))),
+        div(class = "pair-row-simple", div(class = "pair-left-mid", input_num(paste0("opt_ki_", idx), value = NA)))
+      ),
+      simple_text_field(paste0("opt_ref_", idx), "Reference", ""),
+      div(class = "pair-reset-alone", reset_button(paste0("reset_opt_", idx)))
+    ),
+    note_html("Ki, IC<sub>50,u</sub>/2 or IC<sub>50</sub>/2 corrected for microsomal protein binding, please define if used Ki, IC<sub>50,u</sub>/2 or IC50/2")
+  )
+}
+
+tr_ref_text <- function(id, label = "Reference", value = "") {
+  div(
+    class = "pair-block",
+    div(class = "pair-head-simple", div(class = "pair-left-head", label_html(label))),
+    div(class = "pair-row-simple", div(class = "pair-left-wide", textInput(id, NULL, value = value, width = "100%")))
+  )
+}
+
+tr_card <- function(row, idx) {
+  div(
+    class = "tr-card",
+    div(class = "enzyme-title", row$transporter),
+    div(
+      class = "five-col-grid",
+      div(
+        class = "pair-block-no-ref",
+        div(class = "pair-head-simple", div(class = "pair-left-head", label_html("Ki<sub>u</sub>"))),
+        div(class = "pair-row-simple", div(class = "pair-left-wide", input_num(paste0("tr_ki_", idx), value = row$Ki_uM)))
+      ),
+      div(
+        class = "pair-block-no-ref",
+        div(class = "pair-head-simple", div(class = "pair-left-head", label_html("IC50<sub>,u</sub>"))),
+        div(class = "pair-row-simple", div(class = "pair-left-wide", input_num(paste0("tr_ic50_", idx), value = row$IC50_uM)))
+      ),
+      div(
+        class = "pair-block-no-ref",
+        div(class = "pair-head-simple", div(class = "pair-left-head", label_html("[S]"))),
+        div(class = "pair-row-simple", div(class = "pair-left-wide", input_num(paste0("tr_s_", idx), value = row$S_uM)))
+      ),
+      div(
+        class = "pair-block-no-ref",
+        div(class = "pair-head-simple", div(class = "pair-left-head", label_html("K<sub>m</sub>"))),
+        div(class = "pair-row-simple", div(class = "pair-left-wide", input_num(paste0("tr_km_", idx), value = row$Km_uM)))
+      ),
+      div(
+        class = "tr-ref-wrap",
+        tr_ref_text(paste0("tr_ref_", idx), "Reference", row$ref),
+        div(class = "pair-reset-alone", reset_button(paste0("reset_tr_ref_", idx)))
+      )
+    )
+  )
+}
+
+optional_tr_card <- function(row, idx) {
+  div(
+    class = "tr-card optional-card",
+    div(class = "enzyme-title", row$transporter_label),
+    div(
+      class = "five-col-grid",
+      div(
+        class = "pair-block-no-ref",
+        div(class = "pair-head-simple", div(class = "pair-left-head", label_html("Transporter Name"))),
+        div(class = "pair-row-simple", div(class = "pair-left-wide", textInput(paste0("opt_tr_name_", idx), NULL, value = "", width = "100%")))
+      ),
+      div(
+        class = "pair-block-no-ref",
+        div(class = "pair-head-simple", div(class = "pair-left-head", label_html("Site"))),
+        div(class = "pair-row-simple", div(class = "pair-left-wide", selectInput(paste0("opt_tr_site_", idx), NULL, choices = transporter_site_choices, selected = row$site, width = "100%")))
+      ),
+      div(
+        class = "pair-block-no-ref",
+        div(class = "pair-head-simple", div(class = "pair-left-head", label_html("Threshold"))),
+        div(class = "pair-row-simple", div(class = "pair-left-wide", input_num(paste0("opt_tr_threshold_", idx), value = row$threshold, min = 0, step = 0.01)))
+      ),
+      div(
+        class = "pair-block-no-ref",
+        div(class = "pair-head-simple", div(class = "pair-left-head", label_html("Ki<sub>u</sub>"))),
+        div(class = "pair-row-simple", div(class = "pair-left-wide", input_num(paste0("opt_tr_ki_", idx), value = NA_real_)))
+      ),
+      div(
+        class = "pair-block-no-ref",
+        div(class = "pair-head-simple", div(class = "pair-left-head", label_html("IC50<sub>,u</sub>"))),
+        div(class = "pair-row-simple", div(class = "pair-left-wide", input_num(paste0("opt_tr_ic50_", idx), value = NA_real_)))
+      ),
+      div(
+        class = "pair-block-no-ref",
+        div(class = "pair-head-simple", div(class = "pair-left-head", label_html("[S]"))),
+        div(class = "pair-row-simple", div(class = "pair-left-wide", input_num(paste0("opt_tr_s_", idx), value = NA_real_)))
+      ),
+      div(
+        class = "pair-block-no-ref",
+        div(class = "pair-head-simple", div(class = "pair-left-head", label_html("K<sub>m</sub>"))),
+        div(class = "pair-row-simple", div(class = "pair-left-wide", input_num(paste0("opt_tr_km_", idx), value = NA_real_)))
+      ),
+      div(
+        class = "tr-ref-wrap",
+        tr_ref_text(paste0("opt_tr_ref_", idx), "Reference", ""),
+        div(class = "pair-reset-alone", reset_button(paste0("reset_opt_tr_", idx)))
+      )
+    ),
+    note_html("For optional transporters, define site and threshold manually. If Ki,u is missing, Ki,u is calculated from IC50,u using the Cheng-Prusoff equation when [S] and Km are provided.")
+  )
+}
+
+system_card <- function(id, title, label, value, ref = "", note = NULL) {
+  div(
+    class = "system-card",
+    div(class = "enzyme-title system-title", title),
+    div(
+      class = "system-head",
+      div(class = "system-head-cell", label_html(label)),
+      div(class = "system-head-cell", label_html("Reference")),
+      div()
+    ),
+    div(
+      class = "system-row",
+      div(class = "system-left", input_num(id, value = value)),
+      div(class = "system-right", textInput(paste0(id, "_ref"), NULL, value = ref, width = "100%")),
+      div(class = "system-reset", reset_button(paste0("reset_", id)))
+    ),
+    if (!is.null(note) && nzchar(note)) note_html(paste0("&#9432; ", note))
+  )
+}
+
+left_panel_ui <- function() {
+  div(
+    class = "left-panel",
+    div(class = "drug-name", textOutput("drug_name_txt", inline = TRUE)),
+    div(
+      class = "structure-box",
+      div(class = "structure-placeholder", "Chemical structure preview removed")
+    ),
+    div(class = "meta-label", "Chemical Formula"),
+    div(class = "formula-text", textOutput("formula_txt", inline = TRUE)),
+    div(
+      class = "mw-table",
+      div(class = "mw-row", div(class = "mw-key", "M.I.M."), div(class = "mw-val", textOutput("mim_txt", inline = TRUE))),
+      div(class = "mw-row", div(class = "mw-key", "M.A.M."), div(class = "mw-val", textOutput("mam_txt", inline = TRUE))),
+      div(class = "mw-row", div(class = "mw-key", "AVG."), div(class = "mw-val", textOutput("avg_txt", inline = TRUE)))
+    )
+  )
+}
+
+substance_tab_content <- function() {
+  div(
+    class = "content-grid",
+    left_panel_ui(),
+    div(
+      class = "right-scroll-area",
+      div(
+        class = "main-panel",
+        div(class = "section-title", "Drug and PK Properties"),
+        div(
+          class = "pk-grid",
+          div(
+            class = "pair-block",
+            div(
+              class = "pair-head",
+              div(class = "pair-left-head", label_html("Chemical Formula")),
+              div(class = "pair-right-head", label_html("Reference")),
+              div()
+            ),
+            div(
+              class = "pair-row",
+              div(class = "pair-left", textInput("formula_input", NULL, value = "C19H22F3N5O2S", width = "100%")),
+              div(class = "pair-right", textInput("formula_input_ref", NULL, value = "", width = "100%")),
+              div(class = "pair-reset", reset_button("reset_formula_input"))
+            ),
+            note_html("Enter formula manually, for example: C19H22F3N5O2S, NaCl, C6H5ClO, Fe2(SO4)3")
+          ),
+          field_pair_select("mw_display", "MW [g/mol]", choices = c("441.47 (AVG)"), selected = "441.47 (AVG)"),
+          field_pair_select("route", "Dosing route", choices = c("Oral", "IV"), selected = "Oral"),
+          field_pair_numeric("dose_mg", "Dose [mg]", value = 300, min = 0),
+          field_pair_numeric("cmax_ng_ml", "Plasma C<sub>max,ss</sub> [ng/mL]", value = NA, min = 0),
+          field_pair_numeric("fu_p", "f<sub>u,p</sub>", value = 0.1, min = 0, max = 1, step = 0.001),
+          field_pair_numeric("bp", "B/P", value = 1, min = 0.0001, step = 0.01, note = "Also called RB in the ICH M12 guidance"),
+          field_pair_numeric("fa", "F<sub>a</sub>", value = 1, min = 0, max = 1, step = 0.01, note = "ICH M12 default is 1, if another value is used, please provide justification"),
+          field_pair_numeric("fg", "F<sub>g</sub>", value = 1, min = 0, max = 1, step = 0.01, note = "ICH M12 default is 1, if another value is used, please provide justification"),
+          field_pair_numeric("ka_min", "k<sub>a</sub> [min<sup>-1</sup>]", value = 0.1, min = 0, step = 0.001, note = "ICH M12 default is 0.1, if another value is used, please provide justification")
+        ),
+        div(class = "subsection-title", "CYP Reversible Inhibition"),
+        uiOutput("cyp_ki_ui"),
+        div(class = "subsection-title", "Optional enzymes"),
+        uiOutput("optional_ui"),
+        div(class = "subsection-title", "CYP time-Dependent Inhibition"),
+        uiOutput("cyp_tdi_ui"),
+        div(class = "subsection-title", "CYP Induction"),
+        uiOutput("cyp_ind_ui"),
+        div(class = "subsection-title", HTML("Transporter Inhibition<sup>*</sup>")),
+        uiOutput("tr_ui"),
+        div(class = "subsection-title", "Optional transporters"),
+        uiOutput("optional_tr_ui")
+      )
+    )
+  )
+}
+
+system_tab_content <- function() {
+  div(
+    class = "content-grid",
+    left_panel_ui(),
+    div(
+      class = "right-scroll-area",
+      div(
+        class = "main-panel system-main-panel",
+        div(class = "section-title", "CYP"),
+        div(class = "system-grid", uiOutput("system_cyp_ui")),
+        div(class = "subsection-title", "Other properties"),
+        div(class = "system-grid", uiOutput("system_other_ui")),
+        div(class = "subsection-title", "Optional enzymes"),
+        div(class = "system-grid", uiOutput("system_optional_ui")),
+        div(class = "system-fg-wrap", uiOutput("system_fg_ui"))
+      )
+    )
+  )
+}
+
+intermediate_tab_content <- function() {
+  div(
+    class = "content-grid",
+    left_panel_ui(),
+    div(
+      class = "right-scroll-area",
+      div(
+        class = "main-panel inter-main-panel",
+        div(class = "section-title", "Intermediate parameter values"),
+        div(class = "inter-subtitle", "Calculated Parameters"),
+        uiOutput("intermediate_calc_ui"),
+        div(class = "inter-subtitle", "CYP DDI"),
+        uiOutput("intermediate_cyp_ddi_ui"),
+        div(class = "inter-subtitle", "CYP3A4 strongest TDI"),
+        uiOutput("intermediate_tdi_top_ui"),
+        div(class = "inter-subtitle", "Transporter DDI"),
+        uiOutput("intermediate_transporter_ui")
+      )
+    )
+  )
+}
+
+report_tab_content <- function() {
+  div(
+    class = "content-grid",
+    left_panel_ui(),
+    div(
+      class = "right-scroll-area",
+      div(
+        class = "main-panel report-main-panel",
+        div(class = "report-title", textOutput("report_title_txt", inline = TRUE)),
+        div(class = "report-section-title", "Tier 1 Risk Assessment - based upon regulatory guidance"),
+        uiOutput("report_tier1_ui"),
+        div(class = "report-gap"),
+        div(class = "report-section-title", "Tier 2 Risk Assessment - Net Effect Model - based upon regulatory guidance"),
+        uiOutput("report_tier2_ui")
+      )
+    )
+  )
+}
+
+transporter_report_tab_content <- function() {
+  div(
+    class = "content-grid",
+    left_panel_ui(),
+    div(
+      class = "right-scroll-area",
+      div(
+        class = "main-panel tr-report-main-panel",
+        div(class = "report-title", textOutput("tr_report_title_txt", inline = TRUE)),
+        uiOutput("transporter_report_ui")
+      )
+    )
+  )
+}
+
+ui <- fluidPage(
+  tags$head(
+    tags$style(HTML("
+      html, body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        background: #efefef;
+        font-family: Arial, Helvetica, sans-serif;
+        color: #222222;
+        overflow: hidden;
+      }
+      .container-fluid {
+        padding-left: 0;
+        padding-right: 0;
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+      }
+      .page-wrap {
+        display: flex;
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+      }
+      .icon-rail {
+        width: 36px;
+        min-width: 36px;
+        background: #e5e5e5;
+        border-right: 1px solid #d2d2d2;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding-top: 8px;
+        gap: 10px;
+        height: 100vh;
+        overflow: hidden;
+      }
+      .rail-icon {
+        width: 20px;
+        height: 20px;
+        border: 1px solid #777777;
+        border-radius: 3px;
+        background: #f7f7f7;
+      }
+      .rail-badge {
+        margin-top: auto;
+        margin-bottom: 12px;
+        writing-mode: vertical-rl;
+        transform: rotate(180deg);
+        background: #f97316;
+        color: #ffffff;
+        font-size: 12px;
+        font-weight: 700;
+        padding: 6px 4px;
+        border-radius: 12px;
+      }
+      .app-wrap {
+        flex: 1;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        min-width: 0;
+      }
+      .top-title {
+        font-size: 18px;
+        padding: 10px 20px;
+        border-bottom: 1px solid #d0d0d0;
+        background: #efefef;
+        flex: 0 0 auto;
+      }
+      .tabs-holder {
+        flex: 1 1 auto;
+        min-height: 0;
+        min-width: 0;
+        overflow: hidden;
+      }
+      .tabs-holder .tab-content {
+        height: calc(100vh - 92px);
+        overflow: hidden;
+      }
+      .tabs-holder .tab-pane {
+        height: 100%;
+      }
+      .tabs-holder .nav {
+        margin-left: 20px;
+        margin-right: 20px;
+      }
+      .tabs-holder .nav-tabs {
+        border-bottom: 1px solid #d0d0d0;
+      }
+      .tabs-holder .nav-tabs > li > a {
+        color: #444444;
+      }
+      .tabs-holder .nav-tabs > li.active > a,
+      .tabs-holder .nav-tabs > li.active > a:hover,
+      .tabs-holder .nav-tabs > li.active > a:focus {
+        color: #111111;
+        font-weight: 700;
+      }
+      .content-grid {
+        display: grid;
+        grid-template-columns: 220px minmax(0, 1fr);
+        gap: 24px;
+        align-items: start;
+        padding: 10px 20px 24px 20px;
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        min-width: 0;
+        overflow: hidden;
+        box-sizing: border-box;
+      }
+      .left-panel {
+        position: sticky;
+        top: 0;
+        align-self: start;
+        z-index: 10;
+        background: #efefef;
+      }
+      .right-scroll-area {
+        width: 100%;
+        height: 100%;
+        min-width: 0;
+        min-height: 0;
+        overflow: auto;
+        padding-right: 8px;
+        box-sizing: border-box;
+      }
+      .drug-name {
+        font-size: 18px;
+        font-weight: 700;
+        margin-bottom: 8px;
+      }
+      .structure-box {
+        width: 200px;
+        height: 235px;
+        border: 1px solid #d1d1d1;
+        background: #f2f2f2;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .structure-placeholder {
+        font-size: 13px;
+        color: #666666;
+        text-align: center;
+        line-height: 1.4;
+        padding: 12px;
+      }
+      .meta-label {
+        margin-top: 10px;
+        font-size: 14px;
+      }
+      .formula-text {
+        font-size: 18px;
+        font-weight: 700;
+        line-height: 1.1;
+      }
+      .mw-table {
+        margin-top: 10px;
+        width: 100%;
+      }
+      .mw-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+        margin-bottom: 2px;
+      }
+      .mw-key {
+        text-decoration: underline;
+        font-size: 14px;
+      }
+      .mw-val {
+        font-size: 16px;
+        font-weight: 700;
+      }
+      .main-panel {
+        min-width: 1250px;
+        padding-bottom: 24px;
+      }
+      .system-main-panel {
+        min-width: 1320px;
+      }
+      .inter-main-panel {
+        min-width: 1880px;
+      }
+      .report-main-panel {
+        min-width: 1650px;
+      }
+      .tr-report-main-panel {
+        min-width: 1100px;
+      }
+      .section-title {
+        font-size: 28px;
+        font-weight: 500;
+        margin: 0 0 18px 0;
+      }
+      .subsection-title {
+        font-size: 26px;
+        font-weight: 500;
+        margin: 42px 0 18px 0;
+      }
+      .report-title {
+        font-size: 24px;
+        font-weight: 400;
+        margin: 0 0 14px 0;
+      }
+      .report-section-title {
+        font-size: 16px;
+        font-weight: 700;
+        margin: 14px 0 10px 0;
+      }
+      .report-gap {
+        height: 22px;
+      }
+      .inter-subtitle {
+        font-size: 22px;
+        font-weight: 700;
+        margin: 28px 0 14px 0;
+      }
+      .field-label {
+        font-size: 13px;
+        color: #555555;
+      }
+      .field-note {
+        font-size: 12px;
+        color: #444444;
+        line-height: 1.35;
+        margin-top: 6px;
+      }
+      .pair-block {
+        min-height: 86px;
+      }
+      .pair-block-no-ref {
+        min-height: 70px;
+      }
+      .pair-head {
+        display: grid;
+        grid-template-columns: 1fr 1fr 26px;
+        align-items: end;
+        margin-bottom: 4px;
+      }
+      .pair-head-simple {
+        display: grid;
+        grid-template-columns: 1fr;
+        align-items: end;
+        margin-bottom: 4px;
+      }
+      .pair-row {
+        display: grid;
+        grid-template-columns: minmax(120px, 1fr) minmax(160px, 1.4fr) 26px;
+        align-items: center;
+      }
+      .pair-row-simple {
+        display: grid;
+        grid-template-columns: 1fr;
+      }
+      .pair-left .form-group,
+      .pair-right .form-group,
+      .pair-left-wide .form-group,
+      .pair-left-mid .form-group,
+      .system-left .form-group,
+      .system-right .form-group {
+        margin-bottom: 0;
+      }
+      .pair-left input,
+      .pair-left select,
+      .pair-right input,
+      .pair-left-wide input,
+      .pair-left-mid input,
+      .system-left input,
+      .system-right input {
+        width: 100%;
+        background: #f3f3f3;
+        border: none;
+        border-bottom: 1px solid #a8a8a8;
+        border-radius: 0;
+        box-shadow: none;
+        height: 34px;
+        font-size: 13px;
+      }
+      .pair-left-wide,
+      .pair-left-mid {
+        width: 100%;
+      }
+      .pair-reset,
+      .pair-reset-alone,
+      .system-reset {
+        text-align: center;
+      }
+      .reset-btn {
+        background: transparent;
+        border: none;
+        font-size: 20px;
+        line-height: 1;
+        color: #444444;
+        padding: 0;
+        min-width: 22px;
+      }
+      .reset-btn:hover,
+      .reset-btn:focus,
+      .reset-btn:active {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        color: #111111 !important;
+      }
+      .pk-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(280px, 1fr));
+        gap: 26px 26px;
+      }
+      .three-col-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(280px, 1fr));
+        gap: 26px;
+      }
+      .two-col-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(360px, 1fr));
+        gap: 40px;
+      }
+      .enzyme-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(300px, 1fr));
+        gap: 34px 34px;
+      }
+      .enzyme-title {
+        font-size: 14px;
+        font-weight: 700;
+        margin-bottom: 8px;
+      }
+      .optional-grid {
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) minmax(140px, 160px) minmax(220px, 1fr) 26px;
+        gap: 20px;
+        align-items: start;
+      }
+      .five-col-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(170px, 1fr));
+        gap: 20px;
+        align-items: start;
+      }
+      .tr-ref-wrap {
+        display: grid;
+        grid-template-columns: 1fr 26px;
+        gap: 10px;
+        align-items: center;
+      }
+      .system-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(310px, 1fr));
+        gap: 44px 46px;
+      }
+      .system-card {
+        min-height: 160px;
+      }
+      .system-title {
+        font-size: 14px;
+        font-weight: 700;
+        margin-bottom: 16px;
+      }
+      .system-head {
+        display: grid;
+        grid-template-columns: minmax(180px, 220px) minmax(95px, 110px) 26px;
+        align-items: end;
+        margin-bottom: 4px;
+      }
+      .system-row {
+        display: grid;
+        grid-template-columns: minmax(180px, 220px) minmax(95px, 110px) 26px;
+        align-items: center;
+      }
+      .system-fg-wrap {
+        width: 360px;
+        margin-top: 40px;
+      }
+      .inter-table, .report-table, .tr-report-table {
+        border-collapse: collapse;
+        width: 100%;
+        background: #efefef;
+      }
+      .inter-table th,
+      .inter-table td,
+      .report-table th,
+      .report-table td,
+      .tr-report-table th,
+      .tr-report-table td {
+        border: 1px solid #cfcfcf;
+        padding: 8px 12px;
+        font-size: 13px;
+        vertical-align: top;
+        background: #efefef;
+      }
+      .inter-table th,
+      .report-table th,
+      .tr-report-table th {
+        font-weight: 700;
+        text-align: left;
+      }
+      .inter-center, .report-center, .tr-report-center {
+        text-align: center;
+      }
+      .inter-gray, .report-gray, .tr-report-gray {
+        background: #d7d7d7 !important;
+        color: #666666;
+        font-style: italic;
+      }
+      .inter-mono, .report-mono, .tr-report-mono {
+        font-family: Consolas, Menlo, Monaco, monospace;
+      }
+      .inter-formula, .report-formula, .tr-report-formula {
+        font-family: Georgia, Times, serif;
+        font-size: 16px;
+        line-height: 1.25;
+      }
+      .inter-tight td,
+      .inter-tight th,
+      .report-tight td,
+      .report-tight th,
+      .tr-report-tight td,
+      .tr-report-tight th {
+        padding: 6px 10px;
+      }
+      .inter-small-table {
+        width: 260px;
+      }
+      .report-red, .tr-report-red {
+        background: #ff0d0d !important;
+        color: #ffffff !important;
+        font-weight: 700;
+      }
+      .report-criteria td, .tr-report-criteria td {
+        text-align: center;
+      }
+
+      .cypddi-table {
+        border-collapse: collapse;
+        width: 100%;
+        background: #efefef;
+        table-layout: fixed;
+      }
+      .cypddi-table th,
+      .cypddi-table td {
+        border: 1px solid #c9c9c9;
+        padding: 6px 10px;
+        font-size: 13px;
+        vertical-align: top;
+        background: #efefef;
+      }
+      .cypddi-table th {
+        font-weight: 700;
+        text-align: left;
+      }
+      .cypddi-hdr-center {
+        text-align: center !important;
+      }
+      .cypddi-small {
+        width: 84px;
+        text-align: center;
+      }
+      .cypddi-name {
+        width: 240px;
+      }
+      .cypddi-formula-title {
+        font-size: 18px;
+        font-weight: 400;
+        line-height: 1.1;
+      }
+      .cypddi-formula-cell {
+        font-family: Georgia, Times, serif;
+        font-size: 18px;
+        line-height: 1.25;
+        vertical-align: middle !important;
+      }
+      .cypddi-formula-box {
+        min-height: 250px;
+        display: flex;
+        align-items: flex-start;
+        justify-content: flex-start;
+        padding-top: 6px;
+      }
+      .cypddi-formula-box-gut {
+        min-height: 90px;
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+      }
+      .cypddi-gray {
+        background: #cfcfcf !important;
+        color: #6f6f6f;
+        font-style: italic;
+      }
+      .cypddi-section {
+        font-size: 16px;
+        font-weight: 400;
+      }
+      .cypddi-optional-head td {
+        background: #efefef;
+        font-size: 15px;
+        font-weight: 400;
+      }
+      .cypddi-empty {
+        background: #efefef !important;
+      }
+      .cypddi-comment {
+        width: 520px;
+      }
+      .cypddi-num {
+        font-family: Consolas, Menlo, Monaco, monospace;
+        text-align: center;
+      }
+      .cypddi-neteq {
+        font-family: Georgia, Times, serif;
+        font-size: 18px;
+        line-height: 1.2;
+      }
+    "))
+  ),
+  div(
+    class = "page-wrap",
+    div(
+      class = "icon-rail",
+      div(class = "rail-icon"),
+      div(class = "rail-icon"),
+      div(class = "rail-icon"),
+      div(class = "rail-icon"),
+      div(class = "rail-icon"),
+      div(class = "rail-icon"),
+      div(class = "rail-icon"),
+      div(class = "rail-icon"),
+      div(class = "rail-icon"),
+      div(class = "rail-badge", "PRD")
+    ),
+    div(
+      class = "app-wrap",
+      div(class = "top-title", textOutput("page_title", inline = TRUE)),
+      div(
+        class = "tabs-holder",
+        tabsetPanel(
+          id = "main_tabs",
+          type = "tabs",
+          tabPanel("Substance input parameters", value = "substance", substance_tab_content()),
+          tabPanel("System input parameters", value = "system", system_tab_content()),
+          tabPanel("Intermediate parameter values", value = "intermediate", intermediate_tab_content()),
+          tabPanel("Cyp DDI risk assessment report", value = "report", report_tab_content()),
+          tabPanel("Transporter DDI risk assessment report", value = "tr_report", transporter_report_tab_content())
+        )
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  default_formula <- "C19H22F3N5O2S"
+  default_mw <- calc_mw_from_formula(default_formula)
+  
+  chem_state <- reactiveValues(
+    drug_name = "NVP-BYL719",
+    formula = default_formula,
+    mim = paste0(fmt_txt_num(default_mw, 2), " [Da]"),
+    mam = paste0(fmt_txt_num(default_mw, 2), " [Da]"),
+    avg = paste0(fmt_txt_num(default_mw, 2), " [Da]"),
+    mw_value = default_mw
+  )
+  
+  output$page_title <- renderText({
+    if (identical(input$main_tabs, "system")) {
+      "System input parameters"
+    } else if (identical(input$main_tabs, "intermediate")) {
+      "Intermediate parameter values"
+    } else if (identical(input$main_tabs, "report")) {
+      "Cyp DDI risk assessment report"
+    } else if (identical(input$main_tabs, "tr_report")) {
+      "Transporter DDI risk assessment report"
+    } else {
+      "Substance input parameters"
+    }
+  })
+  
+  output$report_title_txt <- renderText(paste0("Cyp DDI risk assessment report for ", chem_state$drug_name))
+  output$tr_report_title_txt <- renderText(paste0("Transporter DDI risk assessment report for ", chem_state$drug_name))
+  
+  output$drug_name_txt <- renderText(chem_state$drug_name)
+  output$formula_txt <- renderText(chem_state$formula)
+  output$mim_txt <- renderText(chem_state$mim)
+  output$mam_txt <- renderText(chem_state$mam)
+  output$avg_txt <- renderText(chem_state$avg)
+  
+  output$structure_ui <- renderUI({
+    div(
+      class = "structure-placeholder",
+      "Chemical structure preview removed"
+    )
+  })
+  
+  observe({
+    formula <- trimws(input$formula_input %||% "")
+    if (!nzchar(formula)) return(NULL)
+    
+    mw <- calc_mw_from_formula(formula)
+    chem_state$formula <- formula
+    
+    if (!is.na(mw)) {
+      chem_state$mim <- paste0(fmt_txt_num(mw, 2), " [Da]")
+      chem_state$mam <- paste0(fmt_txt_num(mw, 2), " [Da]")
+      chem_state$avg <- paste0(fmt_txt_num(mw, 2), " [Da]")
+      chem_state$mw_value <- mw
+      
+      updateSelectInput(
+        session,
+        "mw_display",
+        choices = c(paste0(fmt_txt_num(mw, 2), " (AVG)")),
+        selected = paste0(fmt_txt_num(mw, 2), " (AVG)")
+      )
+    } else {
+      chem_state$mim <- "---"
+      chem_state$mam <- "---"
+      chem_state$avg <- "---"
+      chem_state$mw_value <- NA_real_
+      
+      updateSelectInput(
+        session,
+        "mw_display",
+        choices = c("---"),
+        selected = "---"
+      )
+    }
+  })
+  
+  observeEvent(input$reset_formula_input, {
+    updateTextInput(session, "formula_input", value = default_formula)
+    updateTextInput(session, "formula_input_ref", value = "")
+    
+    chem_state$drug_name <- "NVP-BYL719"
+    chem_state$formula <- default_formula
+    chem_state$mim <- paste0(fmt_txt_num(default_mw, 2), " [Da]")
+    chem_state$mam <- paste0(fmt_txt_num(default_mw, 2), " [Da]")
+    chem_state$avg <- paste0(fmt_txt_num(default_mw, 2), " [Da]")
+    chem_state$mw_value <- default_mw
+    
+    updateSelectInput(
+      session,
+      "mw_display",
+      choices = c(paste0(fmt_txt_num(default_mw, 2), " (AVG)")),
+      selected = paste0(fmt_txt_num(default_mw, 2), " (AVG)")
+    )
+  }, ignoreInit = TRUE)
+  
+  observeEvent(input$reset_mw_display, {
+    mw <- chem_state$mw_value
+    val <- if (is.na(mw)) "---" else paste0(fmt_txt_num(mw, 2), " (AVG)")
+    updateSelectInput(session, "mw_display", selected = val)
+    updateTextInput(session, "mw_display_ref", value = "")
+  }, ignoreInit = TRUE)
+  
+  observeEvent(input$reset_route, {
+    updateSelectInput(session, "route", selected = "Oral")
+    updateTextInput(session, "route_ref", value = "")
+  }, ignoreInit = TRUE)
+  
+  observeEvent(input$reset_dose_mg, {
+    updateNumericInput(session, "dose_mg", value = 300)
+    updateTextInput(session, "dose_mg_ref", value = "")
+  }, ignoreInit = TRUE)
+  
+  observeEvent(input$reset_cmax_ng_ml, {
+    updateNumericInput(session, "cmax_ng_ml", value = NA_real_)
+    updateTextInput(session, "cmax_ng_ml_ref", value = "")
+  }, ignoreInit = TRUE)
+  
+  observeEvent(input$reset_fu_p, {
+    updateNumericInput(session, "fu_p", value = 0.1)
+    updateTextInput(session, "fu_p_ref", value = "")
+  }, ignoreInit = TRUE)
+  
+  observeEvent(input$reset_bp, {
+    updateNumericInput(session, "bp", value = 1)
+    updateTextInput(session, "bp_ref", value = "")
+  }, ignoreInit = TRUE)
+  
+  observeEvent(input$reset_fa, {
+    updateNumericInput(session, "fa", value = 1)
+    updateTextInput(session, "fa_ref", value = "")
+  }, ignoreInit = TRUE)
+  
+  observeEvent(input$reset_fg, {
+    updateNumericInput(session, "fg", value = 1)
+    updateTextInput(session, "fg_ref", value = "")
+  }, ignoreInit = TRUE)
+  
+  observeEvent(input$reset_ka_min, {
+    updateNumericInput(session, "ka_min", value = 0.1)
+    updateTextInput(session, "ka_min_ref", value = "")
+  }, ignoreInit = TRUE)
+  
+  for (i in seq_len(nrow(default_cyp))) {
+    local({
+      row <- default_cyp[i, ]
+      
+      observeEvent(input[[paste0("reset_ki_", row$id_base)]], {
+        updateNumericInput(session, paste0("ki_", row$id_base), value = row$Ki_uM)
+        updateTextInput(session, paste0("ki_", row$id_base, "_ref"), value = row$Ki_ref)
+      }, ignoreInit = TRUE)
+      
+      observeEvent(input[[paste0("reset_KI_", row$id_base)]], {
+        updateNumericInput(session, paste0("KI_", row$id_base), value = row$KI_uM)
+        updateTextInput(session, paste0("KI_", row$id_base, "_ref"), value = row$KI_ref)
+      }, ignoreInit = TRUE)
+      
+      observeEvent(input[[paste0("reset_kinact_", row$id_base)]], {
+        updateNumericInput(session, paste0("kinact_", row$id_base), value = row$kinact_min)
+        updateTextInput(session, paste0("kinact_", row$id_base, "_ref"), value = row$kinact_ref)
+      }, ignoreInit = TRUE)
+      
+      observeEvent(input[[paste0("reset_emax_", row$id_base)]], {
+        updateNumericInput(session, paste0("emax_", row$id_base), value = row$Emax)
+        updateTextInput(session, paste0("emax_", row$id_base, "_ref"), value = row$Emax_ref)
+      }, ignoreInit = TRUE)
+      
+      observeEvent(input[[paste0("reset_ec50_", row$id_base)]], {
+        updateNumericInput(session, paste0("ec50_", row$id_base), value = row$EC50_uM)
+        updateTextInput(session, paste0("ec50_", row$id_base, "_ref"), value = row$EC50_ref)
+      }, ignoreInit = TRUE)
+      
+      observeEvent(input[[paste0("reset_dscalar_", row$id_base)]], {
+        updateNumericInput(session, paste0("dscalar_", row$id_base), value = row$d_scalar)
+        updateTextInput(session, paste0("dscalar_", row$id_base, "_ref"), value = row$d_ref)
+      }, ignoreInit = TRUE)
+    })
+  }
+  
+  for (i in seq_len(nrow(default_optional))) {
+    local({
+      ii <- i
+      observeEvent(input[[paste0("reset_opt_", ii)]], {
+        updateTextInput(session, paste0("opt_name_", ii), value = "")
+        updateNumericInput(session, paste0("opt_ki_", ii), value = NA_real_)
+        updateTextInput(session, paste0("opt_ref_", ii), value = "")
+      }, ignoreInit = TRUE)
+    })
+  }
+  
+  for (i in seq_len(nrow(default_tr))) {
+    local({
+      ii <- i
+      observeEvent(input[[paste0("reset_tr_ref_", ii)]], {
+        updateNumericInput(session, paste0("tr_ki_", ii), value = default_tr$Ki_uM[ii])
+        updateNumericInput(session, paste0("tr_ic50_", ii), value = default_tr$IC50_uM[ii])
+        updateNumericInput(session, paste0("tr_s_", ii), value = default_tr$S_uM[ii])
+        updateNumericInput(session, paste0("tr_km_", ii), value = default_tr$Km_uM[ii])
+        updateTextInput(session, paste0("tr_ref_", ii), value = default_tr$ref[ii])
+      }, ignoreInit = TRUE)
+    })
+  }
+
+  for (i in seq_len(nrow(default_optional_tr))) {
+    local({
+      ii <- i
+      observeEvent(input[[paste0("reset_opt_tr_", ii)]], {
+        updateTextInput(session, paste0("opt_tr_name_", ii), value = "")
+        updateSelectInput(session, paste0("opt_tr_site_", ii), selected = default_optional_tr$site[ii])
+        updateNumericInput(session, paste0("opt_tr_threshold_", ii), value = default_optional_tr$threshold[ii])
+        updateNumericInput(session, paste0("opt_tr_ki_", ii), value = NA_real_)
+        updateNumericInput(session, paste0("opt_tr_ic50_", ii), value = NA_real_)
+        updateNumericInput(session, paste0("opt_tr_s_", ii), value = NA_real_)
+        updateNumericInput(session, paste0("opt_tr_km_", ii), value = NA_real_)
+        updateTextInput(session, paste0("opt_tr_ref_", ii), value = "")
+      }, ignoreInit = TRUE)
+    })
+  }
+  
+  for (i in seq_len(nrow(system_cyp))) {
+    local({
+      row <- system_cyp[i, ]
+      observeEvent(input[[paste0("reset_sys_", row$id_base)]], {
+        updateNumericInput(session, paste0("sys_", row$id_base), value = row$value)
+        updateTextInput(session, paste0("sys_", row$id_base, "_ref"), value = row$ref)
+      }, ignoreInit = TRUE)
+    })
+  }
+  
+  for (i in seq_len(nrow(system_other))) {
+    local({
+      row <- system_other[i, ]
+      observeEvent(input[[paste0("reset_sys_", row$id_base)]], {
+        updateNumericInput(session, paste0("sys_", row$id_base), value = row$value)
+        updateTextInput(session, paste0("sys_", row$id_base, "_ref"), value = row$ref)
+      }, ignoreInit = TRUE)
+    })
+  }
+  
+  for (i in seq_len(nrow(system_optional))) {
+    local({
+      row <- system_optional[i, ]
+      observeEvent(input[[paste0("reset_sys_", row$id_base)]], {
+        updateNumericInput(session, paste0("sys_", row$id_base), value = row$value)
+        updateTextInput(session, paste0("sys_", row$id_base, "_ref"), value = row$ref)
+      }, ignoreInit = TRUE)
+    })
+  }
+  
+  observeEvent(input$reset_sys_Fg, {
+    updateNumericInput(session, "sys_Fg", value = system_fg$value)
+    updateTextInput(session, "sys_Fg_ref", value = system_fg$ref)
+  }, ignoreInit = TRUE)
+  
+  output$cyp_ki_ui <- renderUI({
+    div(class = "enzyme-grid", lapply(seq_len(nrow(default_cyp)), function(i) cyp_ki_card(default_cyp[i, ])))
+  })
+  
+  output$optional_ui <- renderUI({
+    tagList(lapply(seq_len(nrow(default_optional)), function(i) optional_enzyme_card(default_optional$enzyme_label[i], i)))
+  })
+  
+  output$cyp_tdi_ui <- renderUI({
+    tagList(lapply(seq_len(nrow(default_cyp)), function(i) cyp_tdi_card(default_cyp[i, ])))
+  })
+  
+  output$cyp_ind_ui <- renderUI({
+    tagList(lapply(seq_len(nrow(default_cyp)), function(i) cyp_ind_card(default_cyp[i, ])))
+  })
+  
+  output$tr_ui <- renderUI({
+    tagList(lapply(seq_len(nrow(default_tr)), function(i) tr_card(default_tr[i, ], i)))
+  })
+
+  output$optional_tr_ui <- renderUI({
+    tagList(lapply(seq_len(nrow(default_optional_tr)), function(i) optional_tr_card(default_optional_tr[i, ], i)))
+  })
+  
+  output$system_cyp_ui <- renderUI({
+    tagList(lapply(seq_len(nrow(system_cyp)), function(i) {
+      row <- system_cyp[i, ]
+      system_card(
+        id = paste0("sys_", row$id_base),
+        title = row$enzyme,
+        label = row$param_label,
+        value = row$value,
+        ref = row$ref,
+        note = row$note
+      )
+    }))
+  })
+  
+  output$system_other_ui <- renderUI({
+    tagList(lapply(seq_len(nrow(system_other)), function(i) {
+      row <- system_other[i, ]
+      system_card(
+        id = paste0("sys_", row$id_base),
+        title = row$enzyme,
+        label = "fm",
+        value = row$value,
+        ref = row$ref,
+        note = row$note
+      )
+    }))
+  })
+  
+  output$system_optional_ui <- renderUI({
+    tagList(lapply(seq_len(nrow(system_optional)), function(i) {
+      row <- system_optional[i, ]
+      system_card(
+        id = paste0("sys_", row$id_base),
+        title = row$enzyme,
+        label = "fm",
+        value = row$value,
+        ref = row$ref,
+        note = row$note
+      )
+    }))
+  })
+  
+  output$system_fg_ui <- renderUI({
+    system_card(
+      id = "sys_Fg",
+      title = "",
+      label = "Fg",
+      value = system_fg$value,
+      ref = system_fg$ref,
+      note = system_fg$note
+    )
+  })
+  
+  pk_vals <- reactive({
+    qh_ml_min <- input$sys_Qh %||% 1617
+    pk_summary(list(
+      cmax_ng_ml = input$cmax_ng_ml,
+      mw_calc = chem_state$mw_value,
+      fu_p = input$fu_p,
+      dose_mg = input$dose_mg,
+      fa = input$fa,
+      fg = input$fg,
+      ka_min = input$ka_min,
+      qh_L_h = qh_ml_min / 1000 * 60,
+      gut_vol_L = 0.25,
+      route = input$route
+    ))
+  })
+  
+  collect_cyp <- reactive({
+    tibble(
+      enzyme = default_cyp$enzyme,
+      id_base = default_cyp$id_base,
+      Ki_uM = sapply(default_cyp$id_base, function(idb) input[[paste0("ki_", idb)]] %||% NA_real_),
+      KI_uM = sapply(default_cyp$id_base, function(idb) input[[paste0("KI_", idb)]] %||% NA_real_),
+      kinact_min = sapply(default_cyp$id_base, function(idb) input[[paste0("kinact_", idb)]] %||% NA_real_),
+      Emax = sapply(default_cyp$id_base, function(idb) input[[paste0("emax_", idb)]] %||% NA_real_),
+      EC50_uM = sapply(default_cyp$id_base, function(idb) input[[paste0("ec50_", idb)]] %||% NA_real_),
+      d_scalar = sapply(default_cyp$id_base, function(idb) {
+        v <- input[[paste0("dscalar_", idb)]]
+        if (is.null(v) || (length(v) == 1 && is.na(v))) 1 else v
+      })
+    )
+  })
+
+  collect_optional_cyp <- reactive({
+    tibble(
+      enzyme = sapply(seq_len(nrow(default_optional)), function(i) {
+        nm <- trimws(input[[paste0("opt_name_", i)]] %||% "")
+        if (nzchar(nm)) nm else paste0("Enzyme ", i)
+      }),
+      Ki_uM = sapply(seq_len(nrow(default_optional)), function(i) input[[paste0("opt_ki_", i)]] %||% NA_real_),
+      fm = sapply(seq_len(nrow(system_optional)), function(i) input[[paste0("sys_", system_optional$id_base[i])]] %||% system_optional$value[i])
+    )
+  })
+  
+  collect_transporters <- reactive({
+    tibble(
+      transporter = default_tr$transporter,
+      site = default_tr$site,
+      Ki_uM = sapply(seq_len(nrow(default_tr)), function(i) input[[paste0("tr_ki_", i)]] %||% NA_real_),
+      IC50_uM = sapply(seq_len(nrow(default_tr)), function(i) input[[paste0("tr_ic50_", i)]] %||% NA_real_),
+      S_uM = sapply(seq_len(nrow(default_tr)), function(i) input[[paste0("tr_s_", i)]] %||% NA_real_),
+      Km_uM = sapply(seq_len(nrow(default_tr)), function(i) input[[paste0("tr_km_", i)]] %||% NA_real_)
+    )
+  })
+
+  collect_optional_transporters <- reactive({
+    tibble(
+      transporter = sapply(seq_len(nrow(default_optional_tr)), function(i) trimws(input[[paste0("opt_tr_name_", i)]] %||% "")),
+      site = sapply(seq_len(nrow(default_optional_tr)), function(i) input[[paste0("opt_tr_site_", i)]] %||% default_optional_tr$site[i]),
+      threshold = sapply(seq_len(nrow(default_optional_tr)), function(i) input[[paste0("opt_tr_threshold_", i)]] %||% default_optional_tr$threshold[i]),
+      Ki_uM = sapply(seq_len(nrow(default_optional_tr)), function(i) input[[paste0("opt_tr_ki_", i)]] %||% NA_real_),
+      IC50_uM = sapply(seq_len(nrow(default_optional_tr)), function(i) input[[paste0("opt_tr_ic50_", i)]] %||% NA_real_),
+      S_uM = sapply(seq_len(nrow(default_optional_tr)), function(i) input[[paste0("opt_tr_s_", i)]] %||% NA_real_),
+      Km_uM = sapply(seq_len(nrow(default_optional_tr)), function(i) input[[paste0("opt_tr_km_", i)]] %||% NA_real_)
+    )
+  })
+  
+  get_kdeg_h <- function(idb, input) {
+    if (grepl("CYP3A4", idb)) return(input$sys_CYP3A4 %||% 0.00032)
+    switch(
+      idb,
+      "CYP1A2" = input$sys_CYP1A2 %||% 0.00030,
+      "CYP2A6" = input$sys_CYP2A6 %||% 0.00030,
+      "CYP2B6" = input$sys_CYP2B6 %||% 0.00036,
+      "CYP2C8" = input$sys_CYP2C8 %||% 0.00053,
+      "CYP2C9" = input$sys_CYP2C9 %||% 0.00011,
+      "CYP2C19" = input$sys_CYP2C19 %||% 0.00044,
+      "CYP2D6" = input$sys_CYP2D6 %||% 0.00023,
+      "CYP2E1" = input$sys_CYP2E1 %||% 0.00030,
+      input$sys_CYP3A4 %||% 0.00032
+    )
+  }
+  
+  output$intermediate_calc_ui <- renderUI({
+    mw <- chem_state$mw_value
+    dose_umol <- if (!is.null(input$dose_mg) && !is.na(input$dose_mg) && !is.na(mw)) input$dose_mg * 1000 / mw else NA_real_
+    cmax_total <- pk_vals()$cmax_total_uM
+    cmax_unbound <- pk_vals()$cmax_unbound_uM
+    igut <- pk_vals()$igut_uM
+    qent <- input$sys_Qent %||% 300
+    qh <- input$sys_Qh %||% 1617
+    rb <- input$bp %||% NA_real_
+    
+    ient <- calc_i_ent_uM(input$dose_mg, mw, input$ka_min, input$fa, qent, route = input$route)
+    ih_total <- calc_ih_total_uM(cmax_total, input$dose_mg, mw, input$ka_min, input$fa, input$fg, qh, rb, route = input$route)
+    ih_unbound <- calc_ih_unbound_uM(cmax_total, input$dose_mg, mw, input$ka_min, input$fa, input$fg, qh, rb, input$fu_p, route = input$route)
+    
+    tags$table(
+      class = "inter-table",
+      tags$thead(
+        tags$tr(
+          tags$th("Parameter"),
+          tags$th("Value"),
+          tags$th("Equation"),
+          tags$th("Comments")
+        )
+      ),
+      tags$tbody(
+        tags$tr(tags$td(colspan = 4, "Drug dose and concentrations")),
+        tags$tr(
+          tags$td(HTML("Dose (&mu;mol)")),
+          tags$td(class = "inter-center inter-mono", fmt_txt_num(dose_umol)),
+          tags$td(class = "inter-formula", HTML("= Dose (mg) &divide; MW (mg mmol<sup>-1</sup>) &times; <span style='color:#d95319;'>1000</span>")),
+          tags$td(class = "inter-mono", if (identical(input$route, "IV")) "Not applicable when i.v. dosing" else "")
+        ),
+        tags$tr(
+          tags$td(HTML("C<sub>max,total</sub> (&mu;M)")),
+          tags$td(class = "inter-center inter-mono", fmt_txt_num(cmax_total)),
+          tags$td(class = "inter-formula", HTML("= Cmax<sub>total</sub> (ng mL<sup>-1</sup>) &divide; MW (mg mmol<sup>-1</sup>)")),
+          tags$td("")
+        ),
+        tags$tr(
+          tags$td(HTML("C<sub>max,unbound</sub> (&mu;M)")),
+          tags$td(class = "inter-center inter-mono", fmt_txt_num(cmax_unbound)),
+          tags$td(class = "inter-formula", HTML("= Cmax<sub>total</sub> (&mu;M) &times; f<sub>u,p</sub>")),
+          tags$td("")
+        ),
+        tags$tr(
+          tags$td(HTML("Total intestinal lumen concentration ([I]<sub>gut</sub>) (&mu;M)")),
+          tags$td(class = "inter-center inter-mono", fmt_txt_num(igut)),
+          tags$td(class = "inter-formula", HTML("= Dose (&mu;mol) &divide; <span style='color:#d95319;'>0.25</span> (L)")),
+          tags$td(class = "inter-mono", if (identical(input$route, "IV")) "Not applicable when i.v. dosing" else "")
+        ),
+        tags$tr(
+          tags$td(HTML("Total enterocyte concentration ([I]<sub>ent</sub>) (&mu;M)")),
+          tags$td(class = "inter-center inter-mono", fmt_txt_num(ient)),
+          tags$td(class = "inter-formula", HTML("= k<sub>a</sub> (min<sup>-1</sup>) &times; f<sub>a</sub> &times; Dose (&mu;mol) &divide; Q<sub>ent</sub> (mL min<sup>-1</sup>) &times; <span style='color:#d95319;'>1000</span>")),
+          tags$td(class = "inter-mono", if (identical(input$route, "IV")) "Not applicable when i.v. dosing" else "")
+        ),
+        tags$tr(
+          tags$td(HTML("Unbound hepatic inlet concentration ([I]<sub>h,u</sub>) (&mu;M)")),
+          tags$td(class = "inter-center inter-mono", fmt_txt_num(ih_unbound)),
+          tags$td(class = "inter-formula", HTML("= f<sub>u,p</sub> &times; ( C<sub>max,total</sub> (&mu;M) + (k<sub>a</sub> &times; f<sub>a</sub> &times; F<sub>g</sub> &times; Dose (&mu;mol) &divide; Q<sub>h</sub> (mL min<sup>-1</sup>)) &divide; Rb &times; <span style='color:#d95319;'>1000</span> )")),
+          tags$td(class = "inter-mono", if (identical(input$route, "IV")) "=Cmax,u when i.v. dosing" else "")
+        ),
+        tags$tr(
+          tags$td(HTML("Total hepatic inlet concentration ([I]<sub>h</sub>) (&mu;M)")),
+          tags$td(class = "inter-center inter-mono", fmt_txt_num(ih_total)),
+          tags$td(class = "inter-formula", HTML("= C<sub>max,total</sub> (&mu;M) + (k<sub>a</sub> &times; f<sub>a</sub> &times; F<sub>g</sub> &times; Dose (&mu;mol) &divide; Q<sub>h</sub> (mL min<sup>-1</sup>)) &divide; Rb &times; <span style='color:#d95319;'>1000</span>")),
+          tags$td(class = "inter-mono", if (identical(input$route, "IV")) "=Cmax when i.v. dosing" else "")
+        )
+      )
+    )
+  })
+  
+  output$intermediate_cyp_ddi_ui <- renderUI({
+    cyp_df <- collect_cyp()
+    opt_df <- collect_optional_cyp()
+    ih <- calc_ih_total_uM(
+      pk_vals()$cmax_total_uM,
+      input$dose_mg,
+      chem_state$mw_value,
+      input$ka_min,
+      input$fa,
+      input$fg,
+      input$sys_Qh %||% 1617,
+      input$bp,
+      route = input$route
+    )
+    ig <- pk_vals()$igut_uM
+    
+    liver_formula_rowspan <- nrow(cyp_df) + 1 + 3
+    
+    liver_rows <- lapply(seq_len(nrow(cyp_df)), function(i) {
+      r <- cyp_df[i, ]
+      
+      Ah <- if (!is.na(r$Ki_uM) && r$Ki_uM > 0 && !is.na(ih)) {
+        1 / (1 + ih / r$Ki_uM)
+      } else {
+        NA_real_
+      }
+      
+      kdeg_h <- get_kdeg_h(r$id_base, input)
+      
+      Bh <- if (!is.na(r$KI_uM) && !is.na(r$kinact_min) && r$KI_uM > 0 &&
+                !is.na(ih) && !is.na(kdeg_h) && kdeg_h > 0) {
+        kdeg_h / (kdeg_h + (ih * r$kinact_min / (ih + r$KI_uM)))
+      } else {
+        NA_real_
+      }
+      
+      dsc <- input[[paste0("dscalar_", r$id_base)]] %||% 1
+      Ch <- if (grepl("CYP2A6|CYP2D6|CYP2E1", r$enzyme)) {
+        1
+      } else if (!is.na(r$Emax) && !is.na(r$EC50_uM) && r$EC50_uM > 0 && !is.na(ih)) {
+        1 + dsc * r$Emax * ih / (ih + r$EC50_uM)
+      } else {
+        NA_real_
+      }
+      
+      comment <- dplyr::case_when(
+        grepl("CYP2A6", r$enzyme) ~ "Induction is not assessed for CYP2A6",
+        grepl("CYP2D6", r$enzyme) ~ "Induction is not assessed for CYP2D6",
+        grepl("CYP2E1", r$enzyme) ~ "Induction is not assessed for CYP2E1",
+        TRUE ~ ""
+      )
+      
+      formula_cells <- if (i == 1) {
+        tagList(
+          tags$td(
+            rowspan = liver_formula_rowspan,
+            class = "cypddi-formula-title",
+            HTML("Liver:<br><br>Reversible<br>Inhibition")
+          ),
+          tags$td(
+            rowspan = liver_formula_rowspan,
+            class = "cypddi-formula-cell",
+            div(
+              class = "cypddi-formula-box",
+              HTML("A<sub>h</sub> =
+                <span style='display:inline-block; text-align:center; vertical-align:middle; margin-left:6px;'>
+                  <span style='display:block; border-bottom:1px solid #222; padding:0 8px;'>1</span>
+                  <span style='display:block; padding-top:3px;'>1 +
+                    <span style='display:inline-block; text-align:center; vertical-align:middle;'>
+                      <span style='display:block; border-bottom:1px solid #222; padding:0 6px;'>[I]<sub>h</sub></span>
+                      <span style='display:block; padding-top:3px;'>K<sub>i</sub></span>
+                    </span>
+                  </span>
+                </span>")
+            )
+          ),
+          tags$td(
+            rowspan = liver_formula_rowspan,
+            class = "cypddi-formula-title",
+            HTML("Time-dependent<br>Inhibition")
+          ),
+          tags$td(
+            rowspan = liver_formula_rowspan,
+            class = "cypddi-formula-cell",
+            div(
+              class = "cypddi-formula-box",
+              HTML("B<sub>h</sub> =
+                <span style='display:inline-block; text-align:center; vertical-align:middle; margin-left:6px;'>
+                  <span style='display:block; border-bottom:1px solid #222; padding:0 8px;'>k<sub>deg,h</sub></span>
+                  <span style='display:block; padding-top:3px;'>k<sub>deg,h</sub> +
+                    <span style='display:inline-block; text-align:center; vertical-align:middle;'>
+                      <span style='display:block; border-bottom:1px solid #222; padding:0 6px;'>[I]<sub>h</sub> &times; k<sub>inact</sub></span>
+                      <span style='display:block; padding-top:3px;'>[I]<sub>h</sub> + K<sub>I</sub></span>
+                    </span>
+                  </span>
+                </span>")
+            )
+          ),
+          tags$td(
+            rowspan = liver_formula_rowspan,
+            class = "cypddi-formula-title",
+            HTML("Induction")
+          ),
+          tags$td(
+            rowspan = liver_formula_rowspan,
+            class = "cypddi-formula-cell",
+            div(
+              class = "cypddi-formula-box",
+              HTML("C<sub>h</sub> = 1 +
+                <span style='display:inline-block; text-align:center; vertical-align:middle; margin-left:6px;'>
+                  <span style='display:block; border-bottom:1px solid #222; padding:0 8px;'>d &times; E<sub>max</sub> &times; [I]<sub>h</sub></span>
+                  <span style='display:block; padding-top:3px;'>[I]<sub>h</sub> + EC<sub>50</sub></span>
+                </span>")
+            )
+          )
+        )
+      } else {
+        NULL
+      }
+      
+      tags$tr(
+        tags$td(class = "cypddi-name", r$enzyme),
+        tags$td(class = "cypddi-small cypddi-num", fmt_txt_num(Ah)),
+        tags$td(class = "cypddi-small cypddi-num", fmt_txt_num(Bh)),
+        tags$td(
+          class = if (grepl("CYP2A6|CYP2D6|CYP2E1", r$enzyme)) "cypddi-small cypddi-num cypddi-gray" else "cypddi-small cypddi-num",
+          fmt_txt_num(Ch)
+        ),
+        formula_cells,
+        tags$td(class = "cypddi-comment", comment)
+      )
+    })
+    
+    optional_header <- tags$tr(
+      class = "cypddi-optional-head",
+      tags$td(colspan = 4, "Optional Enzymes"),
+      tags$td(colspan = 7, "")
+    )
+    
+    optional_rows <- lapply(seq_len(nrow(opt_df)), function(i) {
+      nm <- input[[paste0("opt_name_", i)]] %||% ""
+      if (!nzchar(nm)) nm <- "---"
+      Ah <- calc_r1(ih, opt_df$Ki_uM[i])
+
+      tags$tr(
+        tags$td(class = "cypddi-name", nm),
+        tags$td(class = "cypddi-small cypddi-num", fmt_txt_num(Ah)),
+        tags$td(class = "cypddi-small cypddi-num cypddi-gray", "1.000"),
+        tags$td(class = "cypddi-small cypddi-num cypddi-gray", "1.000"),
+        tags$td(colspan = 6, class = "cypddi-empty"),
+        tags$td(class = "cypddi-comment", "Only reversible inhibition is assessed for optional enzyme")
+      )
+    })
+    
+    gut_idx <- which(grepl("CYP3A4", cyp_df$enzyme))
+    gut_formula_rowspan <- length(gut_idx)
+    
+    gut_header <- tags$tr(
+      tags$td(colspan = 4, class = "cypddi-empty"),
+      tags$td(colspan = 6, class = "cypddi-section", "Gut:"),
+      tags$td(class = "cypddi-empty", "")
+    )
+    
+    gut_subheader <- tags$tr(
+      tags$td(class = "cypddi-empty"),
+      tags$td(class = "cypddi-small cypddi-hdr-center", HTML("A<sub>g</sub>")),
+      tags$td(class = "cypddi-small cypddi-hdr-center", HTML("B<sub>g</sub>")),
+      tags$td(class = "cypddi-small cypddi-hdr-center", HTML("C<sub>g</sub>")),
+      tags$td(class = "cypddi-formula-title", HTML("Reversible<br>Inhibition")),
+      tags$td(class = "cypddi-formula-title", HTML("time-dependent Inhibition")),
+      tags$td(class = "cypddi-formula-title", "Induction"),
+      tags$td(colspan = 4, class = "cypddi-empty", "")
+    )
+    
+    gut_rows <- lapply(seq_along(gut_idx), function(j) {
+      i <- gut_idx[j]
+      r <- cyp_df[i, ]
+      
+      Ag <- if (!is.na(r$Ki_uM) && r$Ki_uM > 0 && !is.na(ig)) {
+        1 / (1 + ig / r$Ki_uM)
+      } else {
+        NA_real_
+      }
+      
+      kdeg_g <- input$sys_CYP3A4_all %||% 0.00048
+      
+      Bg <- if (!is.na(r$KI_uM) && !is.na(r$kinact_min) && r$KI_uM > 0 &&
+                !is.na(ig) && !is.na(kdeg_g) && kdeg_g > 0) {
+        kdeg_g / (kdeg_g + (ig * r$kinact_min / (ig + r$KI_uM)))
+      } else {
+        NA_real_
+      }
+      
+      dsc <- input[[paste0("dscalar_", r$id_base)]] %||% 1
+      Cg <- if (!is.na(r$Emax) && !is.na(r$EC50_uM) && r$EC50_uM > 0 && !is.na(ig)) {
+        1 + dsc * r$Emax * ig / (ig + r$EC50_uM)
+      } else {
+        NA_real_
+      }
+      
+      formula_cells <- if (j == 1) {
+        tagList(
+          tags$td(
+            rowspan = gut_formula_rowspan,
+            class = "cypddi-formula-cell",
+            div(
+              class = "cypddi-formula-box-gut",
+              HTML("A<sub>g</sub> =
+                <span style='display:inline-block; text-align:center; vertical-align:middle; margin-left:6px;'>
+                  <span style='display:block; border-bottom:1px solid #222; padding:0 8px;'>1</span>
+                  <span style='display:block; padding-top:3px;'>1 +
+                    <span style='display:inline-block; text-align:center; vertical-align:middle;'>
+                      <span style='display:block; border-bottom:1px solid #222; padding:0 6px;'>[I]<sub>g</sub></span>
+                      <span style='display:block; padding-top:3px;'>K<sub>i</sub></span>
+                    </span>
+                  </span>
+                </span>")
+            )
+          ),
+          tags$td(
+            rowspan = gut_formula_rowspan,
+            class = "cypddi-formula-cell",
+            div(
+              class = "cypddi-formula-box-gut",
+              HTML("B<sub>g</sub> =
+                <span style='display:inline-block; text-align:center; vertical-align:middle; margin-left:6px;'>
+                  <span style='display:block; border-bottom:1px solid #222; padding:0 8px;'>k<sub>deg,g</sub></span>
+                  <span style='display:block; padding-top:3px;'>K<sub>deg,g</sub> +
+                    <span style='display:inline-block; text-align:center; vertical-align:middle;'>
+                      <span style='display:block; border-bottom:1px solid #222; padding:0 6px;'>[I]<sub>g</sub> &times; k<sub>inact</sub></span>
+                      <span style='display:block; padding-top:3px;'>[I]<sub>g</sub> + K<sub>I</sub></span>
+                    </span>
+                  </span>
+                </span>")
+            )
+          ),
+          tags$td(
+            rowspan = gut_formula_rowspan,
+            class = "cypddi-formula-cell",
+            div(
+              class = "cypddi-formula-box-gut",
+              HTML("C<sub>g</sub> = 1 +
+                <span style='display:inline-block; text-align:center; vertical-align:middle; margin-left:6px;'>
+                  <span style='display:block; border-bottom:1px solid #222; padding:0 8px;'>d &times; E<sub>max</sub> &times; [I]<sub>g</sub></span>
+                  <span style='display:block; padding-top:3px;'>[I]<sub>g</sub> + EC<sub>50</sub></span>
+                </span>")
+            )
+          )
+        )
+      } else {
+        NULL
+      }
+      
+      tags$tr(
+        tags$td(class = "cypddi-name", r$enzyme),
+        tags$td(class = "cypddi-small cypddi-num", fmt_txt_num(Ag)),
+        tags$td(class = "cypddi-small cypddi-num", fmt_txt_num(Bg)),
+        tags$td(class = "cypddi-small cypddi-num", fmt_txt_num(Cg)),
+        formula_cells,
+        tags$td(colspan = 4, class = "cypddi-empty", "")
+      )
+    })
+    
+    tags$table(
+      class = "cypddi-table",
+      tags$thead(
+        tags$tr(
+          tags$th(colspan = 4, "Net Effect Equation"),
+          tags$th(
+            colspan = 6,
+            class = "cypddi-neteq",
+            HTML("AUCR =
+              <span style='font-size:20px;'>(</span>
+              <span style='display:inline-block; text-align:center; vertical-align:middle;'>
+                <span style='display:block; border-bottom:1px solid #222; padding:0 8px;'>1</span>
+                <span style='display:block; padding-top:3px;'>(A<sub>g</sub> &times; B<sub>g</sub> &times; C<sub>g</sub>) &times; (1 - f<sub>g</sub>) + f<sub>g</sub></span>
+              </span>
+              <span style='font-size:20px;'>)</span>
+              &times;
+              <span style='font-size:20px;'>(</span>
+              <span style='display:inline-block; text-align:center; vertical-align:middle;'>
+                <span style='display:block; border-bottom:1px solid #222; padding:0 8px;'>1</span>
+                <span style='display:block; padding-top:3px;'>(A<sub>h</sub> &times; B<sub>h</sub> &times; C<sub>h</sub>) &times; f<sub>m</sub> + (1 - f<sub>m</sub>)</span>
+              </span>
+              <span style='font-size:20px;'>)</span>")
+          ),
+          tags$th(colspan = 1, "From FDA guidance 2020")
+        ),
+        tags$tr(
+          tags$th(class = "cypddi-name cypddi-empty", ""),
+          tags$th(class = "cypddi-small cypddi-hdr-center", HTML("A<sub>h</sub>")),
+          tags$th(class = "cypddi-small cypddi-hdr-center", HTML("B<sub>h</sub>")),
+          tags$th(class = "cypddi-small cypddi-hdr-center", HTML("C<sub>h</sub>")),
+          tags$th(colspan = 6, class = "cypddi-section", "Liver:"),
+          tags$th(class = "cypddi-empty", "")
+        )
+      ),
+      tags$tbody(
+        liver_rows,
+        optional_header,
+        optional_rows,
+        gut_header,
+        gut_subheader,
+        gut_rows
+      )
+    )
+  })
+  
+  output$intermediate_tdi_top_ui <- renderUI({
+    cyp_df <- collect_cyp()
+    
+    strongest <- cyp_df %>%
+      filter(grepl("CYP3A4", enzyme)) %>%
+      mutate(
+        tdi_score = dplyr::case_when(
+          !is.na(kinact_min) & !is.na(KI_uM) & KI_uM > 0 ~ kinact_min / KI_uM,
+          TRUE ~ NA_real_
+        )
+      ) %>%
+      arrange(desc(tdi_score)) %>%
+      slice(1)
+    
+    strongest_name <- if (nrow(strongest) == 0 || is.na(strongest$tdi_score[1])) "---" else strongest$enzyme[1]
+    strongest_kinact <- if (nrow(strongest) == 0) NA_real_ else strongest$kinact_min[1]
+    strongest_KI <- if (nrow(strongest) == 0) NA_real_ else strongest$KI_uM[1]
+    
+    tags$div(
+      tags$div(style = "margin-bottom:8px; font-size:14px;", HTML(paste0("<b>Selected row:</b> ", strongest_name))),
+      tags$table(
+        class = "inter-table inter-small-table",
+        tags$thead(
+          tags$tr(
+            tags$th(HTML("k<sub>inact</sub>")),
+            tags$th(HTML("KI,u"))
+          )
+        ),
+        tags$tbody(
+          tags$tr(
+            tags$td(class = "inter-center inter-mono", fmt_txt_num(strongest_kinact)),
+            tags$td(class = "inter-center inter-mono", fmt_txt_num(strongest_KI))
+          )
+        )
+      )
+    )
+  })
+  
+  output$intermediate_transporter_ui <- renderUI({
+    opt_tr_df <- collect_optional_transporters()
+
+    make_row <- function(name, value_txt) {
+      tags$tr(
+        tags$td(name),
+        tags$td(HTML("Calculated K<sub>i</sub> value")),
+        tags$td(class = "inter-center inter-mono", value_txt),
+        tags$td(class = "inter-formula", HTML("= IC<sub>50</sub> / (1 + ([S] / k<sub>m</sub>))")),
+        tags$td("Cheng-Prusoff equation")
+      )
+    }
+    
+    tr_rows <- lapply(seq_len(nrow(default_tr)), function(i) {
+      ki <- calc_cheng_prusoff_ki(
+        input[[paste0("tr_ic50_", i)]] %||% NA_real_,
+        input[[paste0("tr_s_", i)]] %||% NA_real_,
+        input[[paste0("tr_km_", i)]] %||% NA_real_
+      )
+      make_row(default_tr$transporter[i], fmt_txt_num(ki))
+    })
+    
+    opt_rows <- lapply(seq_len(nrow(opt_tr_df)), function(i) {
+      nm <- opt_tr_df$transporter[i]
+      if (!nzchar(nm)) nm <- "---"
+      ki <- opt_tr_df$Ki_uM[i]
+      if (is.na(ki)) ki <- calc_cheng_prusoff_ki(opt_tr_df$IC50_uM[i], opt_tr_df$S_uM[i], opt_tr_df$Km_uM[i])
+      make_row(nm, fmt_txt_num(ki))
+    })
+    
+    tags$table(
+      class = "inter-table inter-tight",
+      style = "width:980px;",
+      tags$tbody(
+        tr_rows,
+        tags$tr(tags$td(colspan = 5, "Optional Transporters")),
+        opt_rows
+      )
+    )
+  })
+  
+  output$report_tier1_ui <- renderUI({
+    cyp_df <- collect_cyp()
+    opt_df <- collect_optional_cyp()
+    pk <- pk_vals()
+    opt_names <- sapply(1:3, function(i) {
+      nm <- input[[paste0("opt_name_", i)]] %||% ""
+      if (nzchar(nm)) nm else "---"
+    })
+    
+    r1_vals <- sapply(cyp_df$Ki_uM, function(ki) calc_r1(pk$cmax_unbound_uM, ki))
+    alt_r1_vals <- sapply(cyp_df$Ki_uM, function(ki) calc_r1(pk$igut_uM, ki))
+    r2_vals <- sapply(seq_len(nrow(cyp_df)), function(i) {
+      calc_tdi_auc_ratio(5 * pk$cmax_unbound_uM, cyp_df$KI_uM[i], cyp_df$kinact_min[i], get_kdeg_h(cyp_df$id_base[i], input))
+    })
+    r3_vals <- sapply(seq_len(nrow(cyp_df)), function(i) {
+      dsc <- input[[paste0("dscalar_", cyp_df$id_base[i])]] %||% 1
+      if (is.na(cyp_df$Emax[i]) || is.na(cyp_df$EC50_uM[i]) || cyp_df$EC50_uM[i] <= 0 || is.na(pk$cmax_unbound_uM)) {
+        NA_real_
+      } else {
+        1 / (1 + (dsc * cyp_df$Emax[i] * 10 * pk$cmax_unbound_uM / (10 * pk$cmax_unbound_uM + cyp_df$EC50_uM[i])))
+      }
+    })
+    
+    is_red_r1 <- function(x) !is.na(x) && x >= 1.02
+    is_red_alt_r1 <- function(x, enz) grepl("CYP3A4", enz) && !is.na(x) && x >= 11
+    is_red_r2 <- function(x) !is.na(x) && x >= 1.25
+    is_red_r3 <- function(x) !is.na(x) && x <= 0.8
+    
+    enzyme_rows <- lapply(seq_len(nrow(cyp_df)), function(i) {
+      enz <- cyp_df$enzyme[i]
+      alt_txt <- if (grepl("CYP3A4", enz)) fmt_txt_num(alt_r1_vals[i]) else "Not applicable"
+      alt_cls <- if (grepl("CYP3A4", enz)) {
+        if (is_red_alt_r1(alt_r1_vals[i], enz)) "report-red report-center report-mono" else "report-center report-mono"
+      } else {
+        "report-gray"
+      }
+      r3_txt <- ifelse(is.na(r3_vals[i]), "---", fmt_txt_num(r3_vals[i]))
+      r3_cls <- if (grepl("CYP2A6|CYP2D6|CYP2E1", enz)) "report-gray" else if (is_red_r3(r3_vals[i])) "report-red report-center report-mono" else "report-center report-mono"
+      
+      tags$tr(
+        tags$td(enz),
+        tags$td(class = if (is_red_r1(r1_vals[i])) "report-red report-center report-mono" else "report-center report-mono", fmt_txt_num(r1_vals[i])),
+        tags$td(class = alt_cls, alt_txt),
+        tags$td(class = if (is_red_r2(r2_vals[i])) "report-red report-center report-mono" else "report-center report-mono", fmt_txt_num(r2_vals[i])),
+        tags$td(class = r3_cls, if (grepl("CYP2A6|CYP2D6|CYP2E1", enz)) "Not measured" else r3_txt)
+      )
+    })
+    
+    optional_rows <- lapply(seq_len(nrow(opt_df)), function(i) {
+      opt_r1 <- calc_r1(pk$cmax_unbound_uM, opt_df$Ki_uM[i])
+      tags$tr(
+        tags$td(opt_names[i]),
+        tags$td(class = if (is_red_r1(opt_r1)) "report-red report-center report-mono" else "report-center report-mono", fmt_txt_num(opt_r1)),
+        tags$td(class = "report-gray", "Not applicable"),
+        tags$td(class = "report-gray", "Not measured"),
+        tags$td(class = "report-gray", "Not measured")
+      )
+    })
+    
+    tags$table(
+      class = "report-table report-tight",
+      tags$thead(
+        tags$tr(
+          tags$th(rowspan = 3, "CYP enzyme"),
+          tags$th("Reversible inhibition"),
+          tags$th("Reversible inhibition"),
+          tags$th("TDI"),
+          tags$th("Induction")
+        ),
+        tags$tr(
+          tags$th(HTML("R<sub>1</sub> = 1 + [I] / K<sub>i,u</sub>")),
+          tags$th(HTML("Alternate R<sub>1</sub> = 1 + [I] / K<sub>i,u</sub>")),
+          tags$th(HTML("ICH M12 R<sub>2</sub>")),
+          tags$th(HTML("ICH M12 R<sub>3</sub>"))
+        ),
+        tags$tr(
+          tags$th(HTML("[I] = C<sub>max,unbound</sub>")),
+          tags$th(HTML("[I] = [I]<sub>gut</sub>")),
+          tags$th(HTML("[I] = SF &times; C<sub>max,unbound</sub>")),
+          tags$th(HTML("[I] = SF &times; C<sub>max,unbound</sub>"))
+        )
+      ),
+      tags$tbody(
+        enzyme_rows,
+        tags$tr(tags$td(colspan = 5, class = "report-center", "Optional enzymes")),
+        optional_rows,
+        tags$tr(tags$td(colspan = 5, "")),
+        tags$tr(
+          class = "report-criteria",
+          tags$td("Criteria"),
+          tags$td(HTML("&ge; 0.02")),
+          tags$td(HTML("&ge; 10")),
+          tags$td(HTML("&ge; 1.25")),
+          tags$td(HTML("&le; 0.8"))
+        ),
+        tags$tr(
+          tags$td(""),
+          tags$td(colspan = 4, HTML("<span class='report-red' style='padding:0 4px;'>Red background</span> means \"there's a risk of DDI\". Go to Tier 2 Risk Assessment"))
+        ),
+        tags$tr(
+          tags$td(""),
+          tags$td(colspan = 2, ""),
+          tags$td(class = "report-formula", HTML("R<sub>2</sub> = (k<sub>obs</sub> + k<sub>deg</sub>) / k<sub>deg</sub> where k<sub>obs</sub> = k<sub>inact</sub> &times; SF &times; C<sub>max,unbound</sub> / (K<sub>i</sub> + SF &times; C<sub>max,unbound</sub>)")),
+          tags$td(class = "report-formula", HTML("R<sub>3</sub> = 1 / (1 + d &times; E<sub>max</sub> &times; SF &times; C<sub>max,unbound</sub> / (SF &times; C<sub>max,unbound</sub> + EC<sub>50</sub>))"))
+        ),
+        tags$tr(
+          tags$td(""),
+          tags$td(colspan = 3, HTML("<span style='color:#d95319;'>SF</span> is a Safety Factor where <b>SF = 5</b> as per the ICH M12 guidance 2024")),
+          tags$td(HTML("<span style='color:#d95319;'>SF</span> is a Safety Factor where <b>SF = 10</b> as per the ICH M12 guidance 2024"))
+        )
+      )
+    )
+  })
+  
+  output$report_tier2_ui <- renderUI({
+    cyp_df <- collect_cyp()
+    opt_df <- collect_optional_cyp()
+    ih_unbound <- calc_ih_unbound_uM(
+      pk_vals()$cmax_total_uM,
+      input$dose_mg,
+      chem_state$mw_value,
+      input$ka_min,
+      input$fa,
+      input$fg,
+      input$sys_Qh %||% 1617,
+      input$bp,
+      input$fu_p,
+      route = input$route
+    )
+    igut <- pk_vals()$igut_uM
+    fg_val <- input$sys_Fg %||% 0.51
+    
+    base_rows <- lapply(which(!grepl("CYP3A4", cyp_df$enzyme)), function(i) {
+      r <- cyp_df[i, ]
+      rev <- calc_r1(ih_unbound, r$Ki_uM)
+      tdi <- calc_tdi_auc_ratio(ih_unbound, r$KI_uM, r$kinact_min, get_kdeg_h(r$id_base, input))
+      comb <- combine_static_terms(rev, tdi)
+      ind <- if (grepl("CYP2A6|CYP2D6|CYP2E1", r$enzyme)) NA_real_ else calc_induction_ratio(ih_unbound, r$Emax, r$EC50_uM)
+      fm_val <- switch(
+        r$id_base,
+        "CYP1A2" = input$sys_fm_CYP1A2 %||% 0.8,
+        "CYP2A6" = input$sys_fm_CYP2A6 %||% 1,
+        "CYP2B6" = input$sys_fm_CYP2B6 %||% 0.64,
+        "CYP2C8" = input$sys_fm_CYP2C8 %||% 0.71,
+        "CYP2C9" = input$sys_fm_CYP2C9 %||% 0.91,
+        "CYP2C19" = input$sys_fm_CYP2C19 %||% 0.87,
+        "CYP2D6" = input$sys_fm_CYP2D6 %||% 0.9,
+        "CYP2E1" = input$sys_fm_CYP2E1 %||% 1,
+        1
+      )
+      net <- calc_hepatic_net_aucr(combine_static_terms(comb, ind), fm_val)
+      
+      tags$tr(
+        tags$td(r$enzyme),
+        tags$td(class = "report-center report-mono", fmt_txt_num(r$Ki_uM)),
+        tags$td(class = "report-center report-mono", fmt_txt_num(r$KI_uM)),
+        tags$td(class = "report-center report-mono", fmt_txt_num(r$kinact_min)),
+        tags$td(class = "report-center report-mono", fmt_txt_num(r$Emax)),
+        tags$td(class = "report-center report-mono", fmt_txt_num(r$EC50_uM)),
+        tags$td(class = "report-center report-mono", fmt_txt_num(rev)),
+        tags$td(class = "report-center report-mono", fmt_txt_num(tdi)),
+        tags$td(class = "report-center report-mono", fmt_txt_num(comb)),
+        tags$td(class = if (grepl("CYP2A6|CYP2D6|CYP2E1", r$enzyme)) "report-gray" else "report-center report-mono", if (grepl("CYP2A6|CYP2D6|CYP2E1", r$enzyme)) "Not measured" else fmt_txt_num(ind)),
+        tags$td(class = "report-center report-mono", fmt_txt_num(net))
+      )
+    })
+    
+    cyp3a_rows <- list(
+      tags$tr(tags$td(colspan = 11, "CYP3A4")),
+      {
+        r <- cyp_df %>% filter(id_base == "CYP3A4_midazolam") %>% slice(1)
+        rev <- calc_r1(ih_unbound, r$Ki_uM)
+        tdi_liver <- calc_tdi_auc_ratio(ih_unbound, r$KI_uM, r$kinact_min, input$sys_CYP3A4 %||% 0.00032)
+        ind_liver <- calc_induction_ratio(ih_unbound, r$Emax, r$EC50_uM)
+        comb_liver <- combine_static_terms(rev, tdi_liver)
+        liver_net <- calc_hepatic_net_aucr(combine_static_terms(comb_liver, ind_liver), input$sys_fm_CYP3A4 %||% 0.9)
+        
+        tags$tr(
+          tags$td("  Midazolam (Liver)*"),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$Ki_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$KI_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$kinact_min)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$Emax)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$EC50_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(rev)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(tdi_liver)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(comb_liver)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(ind_liver)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(liver_net))
+        )
+      },
+      {
+        r <- cyp_df %>% filter(id_base == "CYP3A4_midazolam") %>% slice(1)
+        ag <- calc_r1(igut, r$Ki_uM)
+        bg <- calc_tdi_auc_ratio(igut, r$KI_uM, r$kinact_min, input$sys_CYP3A4_all %||% 0.00048)
+        cg <- calc_induction_ratio(igut, r$Emax, r$EC50_uM)
+        comb_gut <- combine_static_terms(ag, bg)
+        gut_net <- calc_gut_net_aucr(combine_static_terms(comb_gut, cg), fg_val)
+        tags$tr(
+          tags$td("  Midazolam (Gut)*"),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$Ki_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$KI_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$kinact_min)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$Emax)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$EC50_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(ag)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(bg)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(comb_gut)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(cg)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(gut_net))
+        )
+      },
+      {
+        r <- cyp_df %>% filter(id_base == "CYP3A4_midazolam") %>% slice(1)
+        rev <- calc_r1(ih_unbound, r$Ki_uM)
+        tdi_liver <- calc_tdi_auc_ratio(ih_unbound, r$KI_uM, r$kinact_min, input$sys_CYP3A4 %||% 0.00032)
+        ind_liver <- calc_induction_ratio(ih_unbound, r$Emax, r$EC50_uM)
+        ag <- calc_r1(igut, r$Ki_uM)
+        bg <- calc_tdi_auc_ratio(igut, r$KI_uM, r$kinact_min, input$sys_CYP3A4_all %||% 0.00048)
+        cg <- calc_induction_ratio(igut, r$Emax, r$EC50_uM)
+        liver_net <- calc_hepatic_net_aucr(combine_static_terms(combine_static_terms(rev, tdi_liver), ind_liver), input$sys_fm_CYP3A4 %||% 0.9)
+        gut_net <- calc_gut_net_aucr(combine_static_terms(combine_static_terms(ag, bg), cg), fg_val)
+        net <- combine_aucr_terms(liver_net, gut_net)
+        tags$tr(
+          tags$td("  Midazolam (Liver + Gut)"),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$Ki_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$KI_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$kinact_min)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$Emax)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$EC50_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(NA_real_)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(NA_real_)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(NA_real_)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(NA_real_)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(net))
+        )
+      },
+      {
+        r <- cyp_df %>% filter(id_base == "CYP3A4_testosterone") %>% slice(1)
+        rev <- calc_r1(ih_unbound, r$Ki_uM)
+        comb_liver <- combine_static_terms(rev)
+        ind_liver <- calc_induction_ratio(ih_unbound, r$Emax, r$EC50_uM)
+        liver_net <- calc_hepatic_net_aucr(combine_static_terms(comb_liver, ind_liver), input$sys_fm_CYP3A4 %||% 0.9)
+        tags$tr(
+          tags$td("  Testosterone (Liver)*"),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$Ki_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$KI_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$kinact_min)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$Emax)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$EC50_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(rev)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(NA_real_)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(comb_liver)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(ind_liver)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(liver_net))
+        )
+      },
+      {
+        r <- cyp_df %>% filter(id_base == "CYP3A4_testosterone") %>% slice(1)
+        ag <- calc_r1(igut, r$Ki_uM)
+        comb_gut <- combine_static_terms(ag)
+        cg <- calc_induction_ratio(igut, r$Emax, r$EC50_uM)
+        gut_net <- calc_gut_net_aucr(combine_static_terms(comb_gut, cg), fg_val)
+        tags$tr(
+          tags$td("  Testosterone (Gut)*"),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$Ki_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$KI_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$kinact_min)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$Emax)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$EC50_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(ag)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(NA_real_)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(comb_gut)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(cg)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(gut_net))
+        )
+      },
+      {
+        r <- cyp_df %>% filter(id_base == "CYP3A4_testosterone") %>% slice(1)
+        rev <- calc_r1(ih_unbound, r$Ki_uM)
+        ag <- calc_r1(igut, r$Ki_uM)
+        ind_liver <- calc_induction_ratio(ih_unbound, r$Emax, r$EC50_uM)
+        cg <- calc_induction_ratio(igut, r$Emax, r$EC50_uM)
+        liver_net <- calc_hepatic_net_aucr(combine_static_terms(rev, ind_liver), input$sys_fm_CYP3A4 %||% 0.9)
+        gut_net <- calc_gut_net_aucr(combine_static_terms(ag, cg), fg_val)
+        net <- combine_aucr_terms(liver_net, gut_net)
+        tags$tr(
+          tags$td("  Testosterone (Liver + Gut)"),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$Ki_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$KI_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$kinact_min)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$Emax)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(r$EC50_uM)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(NA_real_)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(NA_real_)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(NA_real_)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(NA_real_)),
+          tags$td(class = "report-center report-mono", fmt_txt_num(net))
+        )
+      }
+    )
+    
+    optional_rows <- lapply(seq_len(nrow(opt_df)), function(i) {
+      nm <- input[[paste0("opt_name_", i)]] %||% ""
+      if (!nzchar(nm)) nm <- "---"
+      rev <- calc_r1(ih_unbound, opt_df$Ki_uM[i])
+      net <- calc_hepatic_net_aucr(rev, opt_df$fm[i])
+      tags$tr(
+        tags$td(nm),
+        tags$td(class = "report-center report-mono", fmt_txt_num(opt_df$Ki_uM[i])),
+        tags$td(class = "report-center report-mono", "---"),
+        tags$td(class = "report-center report-mono", "---"),
+        tags$td(class = "report-center report-mono", "---"),
+        tags$td(class = "report-center report-mono", "---"),
+        tags$td(class = "report-center report-mono", fmt_txt_num(rev)),
+        tags$td(class = "report-gray", "Not measured"),
+        tags$td(class = "report-center report-mono", fmt_txt_num(rev)),
+        tags$td(class = "report-gray", "Not measured"),
+        tags$td(class = "report-center report-mono", fmt_txt_num(net))
+      )
+    })
+    
+    tags$table(
+      class = "report-table report-tight",
+      tags$thead(
+        tags$tr(
+          tags$th("CYP enzyme"),
+          tags$th(HTML("K<sub>i,u</sub> [&mu;M]")),
+          tags$th(HTML("KI<sub>u</sub> [&mu;M]")),
+          tags$th(HTML("K<sub>inact</sub> [min<sup>-1</sup>]")),
+          tags$th(HTML("E<sub>max</sub> [Fold change]")),
+          tags$th(HTML("EC<sub>50</sub> [&mu;M]")),
+          tags$th(HTML("Reversible inhibition<br>[I] = Unbound Hepatic Inlet <i>Conc</i>")),
+          tags$th(HTML("TDI<br>[I] = Unbound Hepatic Inlet <i>Conc</i>")),
+          tags$th("Reversible inhibition + TDI"),
+          tags$th(HTML("Induction<br>[I] = Unbound Hepatic Inlet <i>Conc</i>")),
+          tags$th(HTML("Net Effect<br>[I] = Unbound Hepatic Inlet <i>Conc</i>"))
+        )
+      ),
+      tags$tbody(
+        base_rows,
+        cyp3a_rows,
+        tags$tr(tags$td(colspan = 11, class = "report-center", "Optional enzymes")),
+        optional_rows,
+        tags$tr(tags$td(colspan = 11, HTML("* substrate used for reversible inhibition <i>in vitro</i> assay"))),
+        tags$tr(
+          tags$td("Criteria"),
+          tags$td(colspan = 10, HTML("&ge; 1.25 or &le; 0.8"))
+        ),
+        tags$tr(
+          tags$td(""),
+          tags$td(colspan = 10, HTML("<span class='report-red' style='padding:0 4px;'>Red background</span> means \"there's a risk of DDI\", go to PBPK modeling"))
+        )
+      )
+    )
+  })
+  
+  output$transporter_report_ui <- renderUI({
+    tr_df <- collect_transporters()
+    opt_tr_df <- collect_optional_transporters()
+    pk <- pk_vals()
+    
+    ih_total <- calc_ih_total_uM(
+      pk$cmax_total_uM,
+      input$dose_mg,
+      chem_state$mw_value,
+      input$ka_min,
+      input$fa,
+      input$fg,
+      input$sys_Qh %||% 1617,
+      input$bp,
+      route = input$route
+    )
+    ih_unbound <- calc_ih_unbound_uM(
+      pk$cmax_total_uM,
+      input$dose_mg,
+      chem_state$mw_value,
+      input$ka_min,
+      input$fa,
+      input$fg,
+      input$sys_Qh %||% 1617,
+      input$bp,
+      input$fu_p,
+      route = input$route
+    )
+    igut <- pk$igut_uM
+    
+    organ_map <- c(
+      "P-gp" = "Intestine *",
+      "BCRP" = "Intestine *",
+      "OATP1B1" = "Liver",
+      "OATP1B3" = "Liver",
+      "OAT1" = "Kidney",
+      "OAT3" = "Kidney",
+      "OCT1" = "Liver",
+      "OCT2" = "Kidney",
+      "MRP2" = "Kidney, Liver",
+      "MATE1" = "Kidney, Liver",
+      "MATE2K" = "Kidney",
+      "BSEP" = "Systemic<br><i>(Liver, Kidney, Brain...)</i>",
+      "NTCP" = "Systemic<br><i>(Liver, Kidney, Brain...)</i>"
+    )
+    
+    tr_label_map <- c(
+      "P-gp" = "Intestinal P-gp",
+      "BCRP" = "Intestinal BCRP",
+      "OATP1B1" = "OATP1B1",
+      "OATP1B3" = "OATP1B3",
+      "OAT1" = "OAT1",
+      "OAT3" = "OAT3",
+      "OCT1" = "OCT1",
+      "OCT2" = "OCT2",
+      "MRP2" = "MRP2",
+      "MATE1" = "MATE1",
+      "MATE2K" = "MATE2-K",
+      "BSEP" = "Systemic BSEP",
+      "NTCP" = "Systemic NTCP"
+    )
+    
+    threshold_map <- c(
+      "P-gp" = "&ge;10",
+      "BCRP" = "&ge;10",
+      "OATP1B1" = "&ge;0.1",
+      "OATP1B3" = "&ge;0.1",
+      "OAT1" = "&ge;0.1",
+      "OAT3" = "&ge;0.1",
+      "OCT1" = "&ge;0.1",
+      "OCT2" = "&ge;0.1",
+      "MRP2" = "&ge;0.1",
+      "MATE1" = "&ge;0.02",
+      "MATE2K" = "&ge;0.02",
+      "BSEP" = "&ge;0.02",
+      "NTCP" = "&ge;0.1"
+    )
+    
+    formula_map <- list(
+      "P-gp" = HTML("<span class='tr-report-formula'>[Dose 250mL] / K<sub>i,u</sub></span>"),
+      "BCRP" = HTML("<span class='tr-report-formula'>[Dose 250mL] / K<sub>i,u</sub></span>"),
+      "OATP1B1" = HTML("<span class='tr-report-formula'>I<sub>in,max,u</sub> / K<sub>i,u</sub></span>"),
+      "OATP1B3" = HTML("<span class='tr-report-formula'>I<sub>in,max,u</sub> / K<sub>i,u</sub></span>"),
+      "OAT1" = HTML("<span class='tr-report-formula'>C<sub>max,u</sub> / K<sub>i,u</sub></span>"),
+      "OAT3" = HTML("<span class='tr-report-formula'>C<sub>max,u</sub> / K<sub>i,u</sub></span>"),
+      "OCT1" = HTML("<span class='tr-report-formula'>I<sub>in,max,u</sub> / K<sub>i,u</sub></span>"),
+      "OCT2" = HTML("<span class='tr-report-formula'>C<sub>max,u</sub> / K<sub>i,u</sub></span>"),
+      "MRP2" = HTML("<span class='tr-report-formula'>I<sub>in,max,u</sub> / K<sub>i,u</sub></span>"),
+      "MATE1" = HTML("<span class='tr-report-formula'>C<sub>max,u</sub> / K<sub>i,u</sub></span>"),
+      "MATE2K" = HTML("<span class='tr-report-formula'>C<sub>max,u</sub> / K<sub>i,u</sub></span>"),
+      "BSEP" = HTML("<span class='tr-report-formula'>I<sub>in,max,u</sub> / K<sub>i,u</sub></span>"),
+      "NTCP" = HTML("<span class='tr-report-formula'>I<sub>in,max,u</sub> / K<sub>i,u</sub></span>")
+    )
+    
+    calc_I_value <- function(site) {
+      if (site == "gut") return(igut)
+      if (site == "hepatic_inlet") return(ih_total)
+      if (site == "hepatic_inlet_unbound") return(ih_unbound)
+      if (site == "systemic_unbound") return(pk$cmax_unbound_uM)
+      pk$cmax_unbound_uM
+    }
+    
+    transporter_rows <- lapply(seq_len(nrow(tr_df)), function(i) {
+      nm <- tr_df$transporter[i]
+      site <- tr_df$site[i]
+      ki_val <- tr_df$Ki_uM[i]
+      if (is.na(ki_val)) ki_val <- calc_cheng_prusoff_ki(tr_df$IC50_uM[i], tr_df$S_uM[i], tr_df$Km_uM[i])
+      oral_gut_only <- nm %in% c("P-gp", "BCRP") && !is_iv_route(input$route)
+      iv_pgp_bcrp <- nm %in% c("P-gp", "BCRP") && is_iv_route(input$route)
+      i_value <- if (oral_gut_only) {
+        igut
+      } else if (iv_pgp_bcrp) {
+        pk$cmax_unbound_uM
+      } else {
+        calc_I_value(site)
+      }
+      ratio <- calc_transporter_ratio(i_value, ki_val)
+      threshold_num <- if (iv_pgp_bcrp) {
+        0.02
+      } else {
+        switch(
+          nm,
+          "P-gp" = 10,
+          "BCRP" = 10,
+          "MATE1" = 0.02,
+          "MATE2K" = 0.02,
+          "BSEP" = 0.02,
+          0.1
+        )
+      }
+      formula_html <- if (iv_pgp_bcrp) {
+        HTML("<span class='tr-report-formula'>C<sub>max,u</sub> / K<sub>i,u</sub></span>")
+      } else {
+        formula_map[[nm]]
+      }
+      threshold_txt <- if (iv_pgp_bcrp) {
+        "&ge;0.02"
+      } else {
+        threshold_map[[nm]]
+      }
+      organ_html <- if (iv_pgp_bcrp) "Systemic *" else organ_map[[nm]]
+      label_txt <- if (iv_pgp_bcrp) nm else tr_label_map[[nm]]
+      red_flag <- !is.na(ratio) && ratio >= threshold_num
+      
+      tags$tr(
+        tags$td(HTML(organ_html)),
+        tags$td(label_txt),
+        tags$td(class = "tr-report-center tr-report-mono", fmt_txt_num(ki_val)),
+        tags$td(formula_html),
+        tags$td(class = if (red_flag) "tr-report-red tr-report-center tr-report-mono" else "tr-report-center tr-report-mono", fmt_txt_num(ratio)),
+        tags$td(class = "tr-report-center", HTML(threshold_txt))
+      )
+    })
+    
+    optional_rows <- lapply(seq_len(nrow(opt_tr_df)), function(i) {
+      nm <- opt_tr_df$transporter[i]
+      if (!nzchar(nm)) nm <- "---"
+      site <- opt_tr_df$site[i]
+      ki_val <- opt_tr_df$Ki_uM[i]
+      if (is.na(ki_val)) ki_val <- calc_cheng_prusoff_ki(opt_tr_df$IC50_uM[i], opt_tr_df$S_uM[i], opt_tr_df$Km_uM[i])
+      i_value <- calc_I_value(site)
+      ratio <- calc_transporter_ratio(i_value, ki_val)
+      threshold_num <- opt_tr_df$threshold[i]
+      red_flag <- !is.na(ratio) && !is.na(threshold_num) && ratio >= threshold_num
+      tags$tr(
+        tags$td(HTML(transporter_organ_html(site, input$route))),
+        tags$td(nm),
+        tags$td(class = "tr-report-center tr-report-mono", fmt_txt_num(ki_val)),
+        tags$td(transporter_formula_html(site, input$route)),
+        tags$td(class = if (red_flag) "tr-report-red tr-report-center tr-report-mono" else "tr-report-center tr-report-mono", fmt_txt_num(ratio)),
+        tags$td(class = "tr-report-center", HTML(paste0("&ge;", fmt_txt_trim(threshold_num))))
+      )
+    })
+    
+    tags$table(
+      class = "tr-report-table tr-report-tight",
+      style = "width: 900px;",
+      tags$thead(
+        tags$tr(
+          tags$th("Organ"),
+          tags$th("Transporter"),
+          tags$th(HTML("K<sub>i,u</sub> (&mu;M)")),
+          tags$th("Formula"),
+          tags$th(HTML("[I] / K<sub>i,u</sub>")),
+          tags$th(HTML("ICH M12<br>Threshold"))
+        )
+      ),
+      tags$tbody(
+        transporter_rows,
+        tags$tr(tags$td(colspan = 6, class = "tr-report-center", "Optional Transporters")),
+        optional_rows,
+        tags$tr(
+          tags$td(colspan = 6, HTML("<span class='tr-report-red' style='padding:0 4px;'>Red background</span> means \"there's a risk of DDI\""))
+        ),
+        tags$tr(
+          tags$td(colspan = 6, HTML("* For oral P-gp/BCRP use [Dose/250 mL]/K<sub>i,u</sub>; for i.v. dosing use C<sub>max,u</sub>/K<sub>i,u</sub> with the post-absorption threshold."))
+        )
+      )
+    )
+  })
+}
+
+shinyApp(ui, server)

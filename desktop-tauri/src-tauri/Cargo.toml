@@ -1,0 +1,16 @@
+[package]
+name = "ddi_risk_assessment_desktop"
+version = "0.1.0"
+description = "Desktop wrapper for the DDI Risk Assessment app"
+authors = ["Everest Medicines"]
+edition = "2021"
+
+[lib]
+name = "ddi_risk_assessment_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }

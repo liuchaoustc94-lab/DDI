@@ -1,0 +1,17 @@
+{
+  "name": "ddi-risk-assessment-desktop-shell",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Isolated Tauri desktop wrapper for the DDI Risk Assessment web app.",
+  "scripts": {
+    "dev": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/invoke-local-node.ps1 ./scripts/run-tauri-cli.cjs dev",
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/invoke-local-node.ps1 ./scripts/run-tauri-cli.cjs build",
+    "tauri:info": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/invoke-local-node.ps1 ./scripts/run-tauri-cli.cjs info",
+    "web:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/invoke-local-node.ps1 ./scripts/run-app-script.cjs dev -- --host 127.0.0.1 --port 4174",
+    "web:build": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/invoke-local-node.ps1 ./scripts/run-app-script.cjs build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

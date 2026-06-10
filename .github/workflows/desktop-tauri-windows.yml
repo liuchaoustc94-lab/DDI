@@ -1,0 +1,96 @@
+name: build-desktop-windows
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "app/**"
+      - "desktop-tauri/**"
+      - ".github/workflows/desktop-tauri-windows.yml"
+
+jobs:
+  bundle-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            desktop-tauri/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build outputs
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            desktop-tauri/src-tauri -> target
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Install desktop wrapper dependencies
+        working-directory: desktop-tauri
+        run: npm ci
+
+      - name: Read desktop build metadata
+        id: meta
+        working-directory: desktop-tauri
+        shell: pwsh
+        run: |
+          $meta = node ./scripts/read-build-metadata.cjs | ConvertFrom-Json
+          $meta | ConvertTo-Json | Out-File -FilePath .artifact-meta.json -Encoding utf8
+          "product_name=$($meta.productName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "product_slug=$($meta.productSlug)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$($meta.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "artifact_base=$($meta.artifactBase)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build Windows desktop bundle
+        working-directory: desktop-tauri
+        run: npm run build
+
+      - name: Stage Windows artifacts
+        id: stage
+        working-directory: desktop-tauri
+        shell: pwsh
+        run: |
+          $stage = node ./scripts/stage-windows-artifacts.cjs | ConvertFrom-Json
+          "bundle_dir=$($stage.bundleArtifactDir)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "installers_dir=$($stage.installersArtifactDir)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "installer_count=$($stage.installerCount)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload desktop bundle directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_base }}-bundle
+          path: ${{ steps.stage.outputs.bundle_dir }}
+          if-no-files-found: error
+
+      - name: Upload desktop installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_base }}-installers
+          path: ${{ steps.stage.outputs.installers_dir }}
+          if-no-files-found: error
+
+      - name: Build summary
+        shell: pwsh
+        run: |
+          @"
+          ## Windows desktop bundle
+
+          - Product: ${{ steps.meta.outputs.product_name }}
+          - Version: ${{ steps.meta.outputs.version }}
+          - Bundle artifact: `${{ steps.meta.outputs.artifact_base }}-bundle`
+          - Installer artifact: `${{ steps.meta.outputs.artifact_base }}-installers`
+          - Installer files found: ${{ steps.stage.outputs.installer_count }}
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
