@@ -1,12 +1,21 @@
 name: build-desktop-windows
+run-name: build-desktop-windows (${{ github.ref_name }})
 
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
+    tags:
+      - "v*"
     paths:
       - "app/**"
       - "desktop-tauri/**"
       - ".github/workflows/desktop-tauri-windows.yml"
+      - ".github/scripts/publish-github-release.mjs"
+
+permissions:
+  contents: write
 
 jobs:
   bundle-windows:
@@ -54,6 +63,15 @@ jobs:
           "version=$($meta.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "artifact_base=$($meta.artifactBase)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      - name: Validate tag matches desktop version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $expectedTag = "v${{ steps.meta.outputs.version }}"
+          if ("${{ github.ref_name }}" -ne $expectedTag) {
+            throw "Release tag mismatch. Expected $expectedTag from desktop-tauri/src-tauri/tauri.conf.json but got ${{ github.ref_name }}."
+          }
+
       - name: Build Windows desktop bundle
         working-directory: desktop-tauri
         run: npm run build
@@ -82,6 +100,34 @@ jobs:
           path: ${{ steps.stage.outputs.installers_dir }}
           if-no-files-found: error
 
+      - name: Prepare GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: release_assets
+        working-directory: desktop-tauri
+        shell: pwsh
+        run: |
+          $releaseDir = Join-Path $PWD '.release-assets'
+          Remove-Item $releaseDir -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $releaseDir | Out-Null
+
+          $bundleZip = Join-Path $releaseDir '${{ steps.meta.outputs.artifact_base }}-bundle.zip'
+          Compress-Archive -Path '${{ steps.stage.outputs.bundle_dir }}' -DestinationPath $bundleZip -Force
+
+          Copy-Item (Join-Path '${{ steps.stage.outputs.installers_dir }}' '*') -Destination $releaseDir -Force
+          "release_dir=$releaseDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: publish_release
+        working-directory: .
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_NAME: ${{ steps.meta.outputs.product_name }} v${{ steps.meta.outputs.version }}
+          RELEASE_ASSET_DIR: ${{ steps.release_assets.outputs.release_dir }}
+          RELEASE_PRERELEASE: ${{ contains(steps.meta.outputs.version, '-') }}
+        run: node ./.github/scripts/publish-github-release.mjs
+
       - name: Build summary
         shell: pwsh
         run: |
@@ -93,4 +139,16 @@ jobs:
           - Bundle artifact: `${{ steps.meta.outputs.artifact_base }}-bundle`
           - Installer artifact: `${{ steps.meta.outputs.artifact_base }}-installers`
           - Installer files found: ${{ steps.stage.outputs.installer_count }}
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Release summary
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          @"
+          ## GitHub release
+
+          - Tag: `${{ github.ref_name }}`
+          - Release: ${{ steps.publish_release.outputs.release_url }}
+          - Attached assets: staged installers, `SHA256SUMS.txt`, and `${{ steps.meta.outputs.artifact_base }}-bundle.zip`
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

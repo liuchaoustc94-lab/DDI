@@ -47,6 +47,11 @@ If `npm` is not on `PATH`, you can use the bundled runtime already present under
 - It uploads two versioned artifacts:
   - a full Windows bundle directory
   - a compact installers package containing the generated `.msi` / `.exe` files and `SHA256SUMS.txt`
+- When you push a matching `v*` tag such as `v0.1.0`, the workflow also creates or updates a GitHub Release and attaches:
+  - the generated installer files
+  - `SHA256SUMS.txt`
+  - a zipped copy of the full Windows bundle directory
+- The tag must match the version in `src-tauri/tauri.conf.json`, otherwise the workflow fails early.
 
 ## Prerequisites on Windows
 

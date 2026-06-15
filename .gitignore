@@ -7,6 +7,7 @@ desktop-tauri/src-tauri/target/
 desktop-tauri/src-tauri/gen/
 desktop-tauri/.artifacts/
 desktop-tauri/.artifact-meta.json
+desktop-tauri/.release-assets/
 
 *.log
 *.pid
