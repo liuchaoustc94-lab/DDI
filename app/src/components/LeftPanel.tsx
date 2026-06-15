@@ -1,7 +1,7 @@
 import { useDDI } from "@/hooks/useDDIStore";
 import { fmtTxtNum } from "@/lib/calculations";
 import { MoleculeViewer } from "./MoleculeViewer";
-import { Atom, Weight, Ruler } from "lucide-react";
+import { Weight, Ruler } from "lucide-react";
 
 export function LeftPanel() {
   const { state } = useDDI();
@@ -10,15 +10,6 @@ export function LeftPanel() {
 
   return (
     <div className="sticky top-0 self-start z-10 w-[220px] space-y-4">
-      {/* Drug Name Card */}
-      <div className="bg-gradient-to-br from-[#0f172a] to-[#1e3a5f] rounded-xl p-4 text-white shadow-lg">
-        <div className="flex items-center gap-2 mb-1">
-          <Atom className="w-4 h-4 text-[#60a5fa]" />
-          <span className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-widest">Drug Name</span>
-        </div>
-        <div className="text-lg font-bold tracking-tight">{state.drugName}</div>
-      </div>
-
       {/* 2D Molecule Structure */}
       <div className="bg-white rounded-xl border border-[#e2e8f0] shadow-sm overflow-hidden p-3">
         <div className="flex items-center justify-between mb-2">
