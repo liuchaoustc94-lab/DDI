@@ -7,31 +7,48 @@ import {
   fmtTxtTrim,
   calcChengPrusoffKi,
   calcTransporterRatio,
+  calcIhTotalUM,
+  calcIhUnboundUM,
 } from "@/lib/calculations";
 import { defaultOptionalTr, defaultTr } from "@/lib/data";
 import { downloadCsvReport, formatCsvExportFeedback, type CsvExportFeedback } from "@/lib/export";
 import { Truck, AlertTriangle, Download } from "lucide-react";
 
-function getStandardOrgan(transporter: string, route: string): string {
-  if (transporter === "P-gp" || transporter === "BCRP") {
-    return route === "IV" ? "Systemic *" : "Intestine *";
-  }
+interface StandardTransporterRowSpec {
+  key: string;
+  transporter: string;
+  label: string;
+  organ: string;
+  site: string;
+  threshold: number;
+}
 
-  const organMap: Record<string, string> = {
-    OATP1B1: "Liver",
-    OATP1B3: "Liver",
-    OAT1: "Kidney",
-    OAT3: "Kidney",
-    OCT1: "Liver",
-    OCT2: "Kidney",
-    MRP2: "Kidney, Liver",
-    MATE1: "Kidney, Liver",
-    MATE2K: "Kidney",
-    BSEP: "Liver",
-    NTCP: "Liver",
-  };
+function buildStandardReportSpecs(route: string): StandardTransporterRowSpec[] {
+  const base: StandardTransporterRowSpec[] = route === "IV"
+    ? [
+        { key: "pgp-systemic", transporter: "P-gp", label: "Systemic Pgp", organ: "Systemic", site: "systemic_unbound", threshold: 0.02 },
+        { key: "bcrp-systemic", transporter: "BCRP", label: "Systemic BCRP", organ: "Systemic", site: "systemic_unbound", threshold: 0.02 },
+      ]
+    : [
+        { key: "pgp-intestinal", transporter: "P-gp", label: "Intestinal P-gp", organ: "Intestine *", site: "gut", threshold: 10 },
+        { key: "bcrp-intestinal", transporter: "BCRP", label: "Intestinal BCRP", organ: "Intestine *", site: "gut", threshold: 10 },
+        { key: "pgp-systemic", transporter: "P-gp", label: "Systemic Pgp", organ: "Systemic", site: "systemic_unbound", threshold: 0.02 },
+        { key: "bcrp-systemic", transporter: "BCRP", label: "Systemic BCRP", organ: "Systemic", site: "systemic_unbound", threshold: 0.02 },
+      ];
 
-  return organMap[transporter] ?? "Systemic";
+  return [
+    ...base,
+    { key: "bsep-systemic", transporter: "BSEP", label: "Systemic BSEP", organ: "Systemic", site: "systemic_unbound", threshold: 0.02 },
+    { key: "oatp1b1", transporter: "OATP1B1", label: "OATP1B1", organ: "Liver", site: "hepatic_inlet_unbound", threshold: 0.1 },
+    { key: "oatp1b3", transporter: "OATP1B3", label: "OATP1B3", organ: "Liver", site: "hepatic_inlet_unbound", threshold: 0.1 },
+    { key: "oct1", transporter: "OCT1", label: "OCT1", organ: "Liver", site: "hepatic_inlet_unbound", threshold: 0.1 },
+    { key: "oct2", transporter: "OCT2", label: "OCT2", organ: "Kidney", site: "systemic_unbound", threshold: 0.1 },
+    { key: "mrp2", transporter: "MRP2", label: "MRP2", organ: "Kidney, Liver", site: "systemic_unbound", threshold: 0.1 },
+    { key: "oat1", transporter: "OAT1", label: "OAT1", organ: "Kidney", site: "systemic_unbound", threshold: 0.1 },
+    { key: "oat3", transporter: "OAT3", label: "OAT3", organ: "Kidney", site: "systemic_unbound", threshold: 0.1 },
+    { key: "mate1", transporter: "MATE1", label: "MATE1", organ: "Kidney, Liver", site: "systemic_unbound", threshold: 0.02 },
+    { key: "mate2k", transporter: "MATE2-K", label: "MATE2-K", organ: "Kidney", site: "systemic_unbound", threshold: 0.02 },
+  ];
 }
 
 function getOptionalOrgan(site: string, route: string): string {
@@ -46,8 +63,8 @@ function getFormulaHtml(site: string, route: string): string {
       ? "C<sub>max,u</sub> / K<sub>i,u</sub>"
       : "[Dose/250 mL] / K<sub>i,u</sub>";
   }
-  if (site === "hepatic_inlet") return "I<sub>in,max</sub> / K<sub>i,u</sub>";
-  if (site === "hepatic_inlet_unbound") return "I<sub>in,max,u</sub> / K<sub>i,u</sub>";
+  if (site === "hepatic_inlet") return "I<sub>h,total</sub> / K<sub>i,u</sub>";
+  if (site === "hepatic_inlet_unbound") return "I<sub>h,u</sub> / K<sub>i,u</sub>";
   return "C<sub>max,u</sub> / K<sub>i,u</sub>";
 }
 
@@ -57,8 +74,8 @@ function getFormulaText(site: string, route: string): string {
       ? "Cmax,u / Ki,u"
       : "[Dose/250 mL] / Ki,u";
   }
-  if (site === "hepatic_inlet") return "Iin,max / Ki,u";
-  if (site === "hepatic_inlet_unbound") return "Iin,max,u / Ki,u";
+  if (site === "hepatic_inlet") return "Ih,total / Ki,u";
+  if (site === "hepatic_inlet_unbound") return "Ih,u / Ki,u";
   return "Cmax,u / Ki,u";
 }
 
@@ -68,24 +85,14 @@ function getIValue(
   values: {
     cmaxUnbound: number;
     igut: number;
-    iinMaxTotal: number;
-    iinMaxUnbound: number;
+    ihTotal: number;
+    ihUnbound: number;
   },
 ): number {
   if (site === "gut") return route === "IV" ? values.cmaxUnbound : values.igut;
-  if (site === "hepatic_inlet") return values.iinMaxTotal;
-  if (site === "hepatic_inlet_unbound") return values.iinMaxUnbound;
+  if (site === "hepatic_inlet") return values.ihTotal;
+  if (site === "hepatic_inlet_unbound") return values.ihUnbound;
   return values.cmaxUnbound;
-}
-
-function getStandardThreshold(transporter: string, route: string): number {
-  if (transporter === "P-gp" || transporter === "BCRP") {
-    return route === "IV" ? 0.02 : 10;
-  }
-  if (transporter === "MATE1" || transporter === "MATE2K" || transporter === "BSEP") {
-    return 0.02;
-  }
-  return 0.1;
 }
 
 export function TransporterReportTab() {
@@ -93,48 +100,56 @@ export function TransporterReportTab() {
   const route = state.route;
   const cmaxUnbound = pkVals.cmaxUnboundUM;
   const igut = pkVals.igutUM;
-  const iinMaxTotal = pkVals.iinMaxTotalUM;
-  const iinMaxUnbound = pkVals.iinMaxUnboundUM;
+  const qh = state.systemCypInputs["Qh"]?.value ?? 1617;
+  const ihTotal = calcIhTotalUM(
+    pkVals.cmaxTotalUM,
+    state.doseMg ?? NaN,
+    state.mwValue,
+    state.kaMin ?? NaN,
+    state.fa ?? NaN,
+    state.fg ?? NaN,
+    qh,
+    state.bp ?? NaN,
+    route,
+  );
+  const ihUnbound = calcIhUnboundUM(
+    pkVals.cmaxTotalUM,
+    state.doseMg ?? NaN,
+    state.mwValue,
+    state.kaMin ?? NaN,
+    state.fa ?? NaN,
+    state.fg ?? NaN,
+    qh,
+    state.bp ?? NaN,
+    state.fuP ?? NaN,
+    route,
+  );
   const [isExporting, setIsExporting] = useState(false);
   const [exportFeedback, setExportFeedback] = useState<CsvExportFeedback | null>(null);
 
-  const trLabelMap: Record<string, string> = {
-    "P-gp": "P-gp",
-    BCRP: "BCRP",
-    OATP1B1: "OATP1B1",
-    OATP1B3: "OATP1B3",
-    OAT1: "OAT1",
-    OAT3: "OAT3",
-    OCT1: "OCT1",
-    OCT2: "OCT2",
-    MRP2: "MRP2",
-    MATE1: "MATE1",
-    MATE2K: "MATE2-K",
-    BSEP: "BSEP",
-    NTCP: "NTCP",
-  };
-
   const standardRows = useMemo(() => {
-    return defaultTr.map((t, i) => {
-      const inputs = state.trInputs[i + 1];
+    const transporterIndexMap = new Map(defaultTr.map((row, index) => [row.transporter, index + 1]));
+
+    return buildStandardReportSpecs(route).map((spec) => {
+      const inputs = state.trInputs[transporterIndexMap.get(spec.transporter) ?? -1];
       const ki = inputs?.ki ?? calcChengPrusoffKi(inputs?.ic50 ?? NaN, inputs?.s ?? NaN, inputs?.km ?? NaN);
-      const I = getIValue(t.site, route, { cmaxUnbound, igut, iinMaxTotal, iinMaxUnbound });
+      const I = getIValue(spec.site, route, { cmaxUnbound, igut, ihTotal, ihUnbound });
       const ratio = calcTransporterRatio(I, ki);
-      const thresholdNum = getStandardThreshold(t.transporter, route);
-      const redFlag = !Number.isNaN(ratio) && ratio >= thresholdNum;
+      const redFlag = !Number.isNaN(ratio) && ratio >= spec.threshold;
 
       return {
-        key: t.transporter,
-        organ: getStandardOrgan(t.transporter, route),
-        label: trLabelMap[t.transporter] ?? t.transporter,
+        key: spec.key,
+        organ: spec.organ,
+        label: spec.label,
         ki,
-        formula: getFormulaHtml(t.site, route),
+        formula: getFormulaHtml(spec.site, route),
+        formulaText: getFormulaText(spec.site, route),
         ratio,
-        threshold: fmtTxtTrim(thresholdNum, 3),
+        threshold: fmtTxtTrim(spec.threshold, 3),
         redFlag,
       };
     });
-  }, [state.trInputs, route, cmaxUnbound, igut, iinMaxTotal, iinMaxUnbound]);
+  }, [state.trInputs, route, cmaxUnbound, igut, ihTotal, ihUnbound]);
 
   const optionalRows = useMemo(() => {
     return defaultOptionalTr.map((opt) => {
@@ -142,7 +157,7 @@ export function TransporterReportTab() {
       const active = Boolean(inputs?.name?.trim()) || [inputs?.ki, inputs?.ic50, inputs?.s, inputs?.km].some((v) => v !== null && v !== undefined);
       const ki = inputs?.ki ?? calcChengPrusoffKi(inputs?.ic50 ?? NaN, inputs?.s ?? NaN, inputs?.km ?? NaN);
       const thresholdNum = inputs?.threshold ?? opt.threshold;
-      const I = getIValue(inputs?.site ?? opt.site, route, { cmaxUnbound, igut, iinMaxTotal, iinMaxUnbound });
+      const I = getIValue(inputs?.site ?? opt.site, route, { cmaxUnbound, igut, ihTotal, ihUnbound });
       const ratio = active ? calcTransporterRatio(I, ki) : NaN;
       const thresholdMissing = Number.isNaN(thresholdNum);
       const redFlag = active && !thresholdMissing && !Number.isNaN(ratio) && ratio >= thresholdNum;
@@ -160,7 +175,7 @@ export function TransporterReportTab() {
         redFlag,
       };
     });
-  }, [state.optionalTrInputs, route, cmaxUnbound, igut, iinMaxTotal, iinMaxUnbound]);
+  }, [state.optionalTrInputs, route, cmaxUnbound, igut, ihTotal, ihUnbound]);
 
   const handleExportReport = async () => {
     const generatedAt = new Date();
@@ -188,19 +203,19 @@ export function TransporterReportTab() {
           ["Metric", "Value"],
           ["Cmax,u (uM)", fmtTxtNum(cmaxUnbound)],
           ["I_gut (uM)", fmtTxtNum(igut)],
-          ["Iin,max (uM)", fmtTxtNum(iinMaxTotal)],
-          ["Iin,max,u (uM)", fmtTxtNum(iinMaxUnbound)],
+          ["Ih,total (uM)", fmtTxtNum(ihTotal)],
+          ["Ih,u (uM)", fmtTxtNum(ihUnbound)],
         ],
       },
       {
         title: "Standard Transporters",
         rows: [
           ["Organ", "Transporter", "Ki_uM", "Formula", "[I]/Ki,u", "Threshold", "Risk"],
-          ...standardRows.map((row, index) => [
+          ...standardRows.map((row) => [
             row.organ.replace(/<[^>]+>/g, ""),
             row.label,
             fmtTxtNum(row.ki),
-            getFormulaText(defaultTr[index]?.site ?? "systemic_unbound", route),
+            row.formulaText,
             fmtTxtNum(row.ratio),
             `>= ${row.threshold}`,
             row.redFlag ? "Risk detected" : "No risk",
@@ -358,7 +373,7 @@ export function TransporterReportTab() {
             <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[#22c55e]" /> No risk</span>
             <span className="flex items-center gap-1.5">
               <AlertTriangle className="w-3.5 h-3.5 text-[#d97706]" />
-              Oral P-gp/BCRP uses [Dose/250 mL]; i.v. P-gp/BCRP uses C<sub>max,u</sub> with cutoff 0.02.
+              Oral P-gp/BCRP now shows both intestinal and systemic checks; hepatic inlet rows follow the workbook-aligned hepatic concentration outputs.
             </span>
           </div>
         </div>

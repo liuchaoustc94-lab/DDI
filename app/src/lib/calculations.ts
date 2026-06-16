@@ -196,7 +196,7 @@ export function calcIhTotalUM(
   if ([cmaxTotalUM, doseMg, mw, kaMin, fa, fg, qhMlMin, rb].some(v => v === null || v === undefined || Number.isNaN(v)) || mw <= 0 || qhMlMin <= 0 || rb <= 0)
     return NaN;
   const doseUmol = doseMg * 1000 / mw;
-  return cmaxTotalUM + ((fa * fg * kaMin * doseUmol) / qhMlMin / rb);
+  return cmaxTotalUM + (((fa * fg * kaMin * doseUmol) / qhMlMin) / rb) * 1000;
 }
 
 /**
@@ -281,26 +281,44 @@ export function calcInductionFactor(I: number, Emax: number, EC50: number, dScal
 }
 
 export function combineStaticTerms(A: number, B: number, C: number): number {
-  const aEff = Number.isNaN(A) ? 1 : A;
-  const bEff = Number.isNaN(B) ? 1 : B;
-  const cEff = Number.isNaN(C) ? 1 : C;
-  return aEff * bEff * cEff;
+  const vals = [A, B, C].filter(v => !Number.isNaN(v));
+  if (!vals.length) return NaN;
+  return vals.reduce((acc, value) => acc * value, 1);
 }
 
 export function calcHepaticNetAUCR(A: number, B: number, C: number, fm: number): number {
-  const fmEff = Number.isNaN(fm) ? 1 : fm;
-  return 1 / (combineStaticTerms(A, B, C) * fmEff + (1 - fmEff));
+  if (Number.isNaN(fm)) return NaN;
+  const effectTerm = combineStaticTerms(A, B, C);
+  if (Number.isNaN(effectTerm)) return NaN;
+  return 1 / (effectTerm * fm + (1 - fm));
 }
 
 export function calcGutNetAUCR(A: number, B: number, C: number, fg: number): number {
-  const fgEff = Number.isNaN(fg) ? 0.51 : fg;
-  return 1 / (combineStaticTerms(A, B, C) * (1 - fgEff) + fgEff);
+  if (Number.isNaN(fg)) return NaN;
+  const effectTerm = combineStaticTerms(A, B, C);
+  if (Number.isNaN(effectTerm)) return NaN;
+  return 1 / (effectTerm * (1 - fg) + fg);
 }
 
 export function combineAUCRTerms(liverAUCR: number, gutAUCR: number): number {
-  const liverEff = Number.isNaN(liverAUCR) ? 1 : liverAUCR;
-  const gutEff = Number.isNaN(gutAUCR) ? 1 : gutAUCR;
-  return gutEff * liverEff;
+  if (Number.isNaN(liverAUCR) && Number.isNaN(gutAUCR)) return NaN;
+  if (Number.isNaN(liverAUCR)) return gutAUCR;
+  if (Number.isNaN(gutAUCR)) return liverAUCR;
+  return gutAUCR * liverAUCR;
+}
+
+/**
+ * Legacy workbook-compatible denominator selection for Tier 1 R2.
+ * Some assessment sheets place the effective TDI constant in the EC50 column;
+ * when that is not populated, the next populated constant is used.
+ */
+export function getTier1TdiDenominator(KI: number, EC50: number, Emax: number): number {
+  for (const value of [EC50, Emax, KI]) {
+    if (!Number.isNaN(value) && value > 0) {
+      return value;
+    }
+  }
+  return NaN;
 }
 
 /**
@@ -338,8 +356,8 @@ export function calcCyp3a4CombinedAUCR(
   Ag: number, Bg: number, Cg: number,
   fm: number, fg: number
 ): number {
-  const aucrLiver = calcHepaticNetAUCR(Ah, Bh, Ch, Number.isNaN(fm) ? 0.9 : fm);
-  const aucrGut = calcGutNetAUCR(Ag, Bg, Cg, Number.isNaN(fg) ? 0.51 : fg);
+  const aucrLiver = calcHepaticNetAUCR(Ah, Bh, Ch, fm);
+  const aucrGut = calcGutNetAUCR(Ag, Bg, Cg, fg);
   return combineAUCRTerms(aucrLiver, aucrGut);
 }
 

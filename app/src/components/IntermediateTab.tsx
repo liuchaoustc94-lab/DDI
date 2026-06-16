@@ -47,7 +47,7 @@ export function IntermediateTab() {
       const Ah = calcReversibleFactor(ihUnbound, ki);
       const Bh = calcTdiFactor(ihUnbound, KI, kinact, kdegH);
       const Ch = /CYP2A6|CYP2D6|CYP2E1/.test(e.enzyme)
-        ? NaN
+        ? 1
         : calcInductionFactor(ihUnbound, Emax, EC50, dScalar as number);
 
       const comment = /CYP2A6/.test(e.enzyme) ? "Induction not assessed for CYP2A6"
@@ -56,13 +56,13 @@ export function IntermediateTab() {
 
       // Gut factors (CYP3A4 only)
       const kdegG = getKdegG(systemCypValues);
-      const Ag = calcReversibleFactor(igut, ki);
-      const Bg = calcTdiFactor(igut, KI, kinact, kdegG);
-      const Cg = calcInductionFactor(igut, Emax, EC50, dScalar as number);
+      const Ag = calcReversibleFactor(ient, ki);
+      const Bg = calcTdiFactor(ient, KI, kinact, kdegG);
+      const Cg = calcInductionFactor(ient, Emax, EC50, dScalar as number);
 
       return { enzyme: e.enzyme, idBase: e.idBase, Ah, Bh, Ch, comment, Ag, Bg, Cg, isCyp3A4: /CYP3A4/.test(e.enzyme) };
     });
-  }, [state.cypInputs, state.systemCypInputs, ihUnbound, igut]);
+  }, [state.cypInputs, state.systemCypInputs, ient, ihUnbound]);
 
   const optionalCypRows = useMemo(() => {
     return defaultOptional.map((opt) => {
@@ -144,8 +144,8 @@ export function IntermediateTab() {
                     { label: "C<sub>max,unbound</sub> (&mu;M)", val: cmaxUnbound, eq: "= Cmax<sub>total</sub> (&mu;M) &times; f<sub>u,p</sub>", cm: "" },
                     { label: "[I]<sub>gut</sub> (&mu;M)", val: igut, eq: "= Dose (&mu;mol) &divide; <span class='text-[#ef4444] font-bold'>0.25</span> L", cm: route === "IV" ? "N/A for i.v." : "" },
                     { label: "[I]<sub>ent</sub> (&mu;M)", val: ient, eq: "= k<sub>a</sub> &times; F<sub>a</sub> &times; Dose (&mu;mol) &divide; Q<sub>ent</sub> &times; <span class='text-[#ef4444] font-bold'>1000</span>", cm: route === "IV" ? "N/A for i.v." : "" },
-                    { label: "[I]<sub>h,u</sub> (&mu;M)", val: ihUnbound, eq: "= f<sub>u,p</sub> &times; (Cmax + F<sub>a</sub>&times;F<sub>g</sub>&times;k<sub>a</sub>&times;Dose/Q<sub>h</sub>/Rb)", cm: route === "IV" ? "=Cmax,u" : "" },
-                    { label: "[I]<sub>h</sub> (&mu;M)", val: ihTotal, eq: "= Cmax + F<sub>a</sub>&times;F<sub>g</sub>&times;k<sub>a</sub>&times;Dose/Q<sub>h</sub>/Rb", cm: route === "IV" ? "=Cmax" : "" },
+                    { label: "[I]<sub>h,u</sub> (&mu;M)", val: ihUnbound, eq: "= f<sub>u,p</sub> &times; (Cmax + F<sub>a</sub>&times;F<sub>g</sub>&times;k<sub>a</sub>&times;Dose/Q<sub>h</sub>/Rb &times; <span class='text-[#ef4444] font-bold'>1000</span>)", cm: route === "IV" ? "=Cmax,u" : "" },
+                    { label: "[I]<sub>h</sub> (&mu;M)", val: ihTotal, eq: "= Cmax + F<sub>a</sub>&times;F<sub>g</sub>&times;k<sub>a</sub>&times;Dose/Q<sub>h</sub>/Rb &times; <span class='text-[#ef4444] font-bold'>1000</span>", cm: route === "IV" ? "=Cmax" : "" },
                   ].map((row, i) => (
                     <tr key={i} className="hover:bg-[#f8fafc] transition-colors">
                       <td className="px-4 py-2.5 text-[13px] text-[#334155] border-b border-[#f1f5f9]" dangerouslySetInnerHTML={{ __html: row.label }} />

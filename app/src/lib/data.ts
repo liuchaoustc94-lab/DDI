@@ -66,10 +66,10 @@ export const defaultTr: Transporter[] = [
   { transporter: "OAT3", Ki_uM: null, IC50_uM: null, S_uM: null, Km_uM: null, ref: "", site: "systemic_unbound" },
   { transporter: "OCT1", Ki_uM: null, IC50_uM: 0.14, S_uM: 10, Km_uM: 5, ref: "", site: "hepatic_inlet_unbound" },
   { transporter: "OCT2", Ki_uM: null, IC50_uM: null, S_uM: null, Km_uM: null, ref: "", site: "systemic_unbound" },
-  { transporter: "MRP2", Ki_uM: null, IC50_uM: null, S_uM: null, Km_uM: null, ref: "", site: "hepatic_inlet_unbound" },
+  { transporter: "MRP2", Ki_uM: null, IC50_uM: null, S_uM: null, Km_uM: null, ref: "", site: "systemic_unbound" },
   { transporter: "MATE1", Ki_uM: null, IC50_uM: 5.10, S_uM: 1, Km_uM: 1.5, ref: "", site: "systemic_unbound" },
   { transporter: "MATE2K", Ki_uM: null, IC50_uM: null, S_uM: null, Km_uM: null, ref: "", site: "systemic_unbound" },
-  { transporter: "BSEP", Ki_uM: null, IC50_uM: 2.35, S_uM: 1, Km_uM: 1.5, ref: "", site: "hepatic_inlet_unbound" },
+  { transporter: "BSEP", Ki_uM: null, IC50_uM: 2.35, S_uM: 1, Km_uM: 1.5, ref: "", site: "systemic_unbound" },
   { transporter: "NTCP", Ki_uM: null, IC50_uM: null, S_uM: null, Km_uM: null, ref: "", site: "hepatic_inlet_unbound" },
 ];
 

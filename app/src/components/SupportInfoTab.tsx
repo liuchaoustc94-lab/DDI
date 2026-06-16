@@ -15,6 +15,8 @@ import {
   calcIEntUM,
   calcIhTotalUM,
   calcIhUnboundUM,
+  calcGutNetAUCR,
+  calcHepaticNetAUCR,
   calcInductionFactor,
   calcNetEffectAUCR,
   calcR1,
@@ -27,6 +29,7 @@ import {
   getFmValue,
   getKdegG,
   getKdegH,
+  getTier1TdiDenominator,
 } from "@/lib/calculations";
 import { defaultCyp, defaultOptional, defaultOptionalTr, defaultTr } from "@/lib/data";
 
@@ -36,6 +39,7 @@ interface MetricDetail {
   formula: string;
   inputs: string;
   rule: string;
+  source?: FormulaSource;
   note?: string;
   tone?: "default" | "success" | "warning";
 }
@@ -45,7 +49,23 @@ interface CalculationCardProps {
   subtitle?: string;
   accent?: "blue" | "emerald" | "amber";
   metrics: MetricDetail[];
+  defaultSource?: FormulaSource;
 }
+
+interface FormulaSource {
+  origin: "Original R" | "Agent Research";
+  source: string;
+}
+
+const ORIGINAL_R_SOURCE: FormulaSource = {
+  origin: "Original R",
+  source: "static DDI code.txt",
+};
+
+const AGENT_GUIDANCE_SOURCE: FormulaSource = {
+  origin: "Agent Research",
+  source: "ICH M12 (2024) + FDA In Vitro DDI Guidance (2020)",
+};
 
 function fmtExpr(value: number | null | undefined, digits = 3): string {
   if (value === null || value === undefined || Number.isNaN(value)) {
@@ -71,7 +91,25 @@ function formatBoolRisk(isRisk: boolean, unavailable = false): string {
   return isRisk ? "Risk detected" : "No risk";
 }
 
-function CalculationCard({ title, subtitle, accent = "blue", metrics }: CalculationCardProps) {
+function FormulaSourceTags({ source }: { source: FormulaSource }) {
+  const originStyles =
+    source.origin === "Original R"
+      ? "border-[#bfdbfe] bg-[#eff6ff] text-[#1d4ed8]"
+      : "border-[#bbf7d0] bg-[#ecfdf5] text-[#047857]";
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] ${originStyles}`}>
+        {source.origin}
+      </span>
+      <span className="rounded-full border border-[#e2e8f0] bg-[#f8fafc] px-2 py-0.5 text-[10px] font-medium text-[#475569]">
+        Source: {source.source}
+      </span>
+    </div>
+  );
+}
+
+function CalculationCard({ title, subtitle, accent = "blue", metrics, defaultSource }: CalculationCardProps) {
   const accentStyles =
     accent === "emerald"
       ? "from-[#ecfdf5] to-white border-[#bbf7d0]"
@@ -94,6 +132,11 @@ function CalculationCard({ title, subtitle, accent = "blue", metrics }: Calculat
       <div className="mt-4 space-y-3">
         {metrics.map((metric) => (
           <div key={`${title}-${metric.label}`} className="rounded-xl border border-white/80 bg-white/90 p-3 shadow-[0_6px_18px_rgba(15,23,42,0.04)]">
+            {(() => {
+              const source = metric.source ?? defaultSource;
+
+              return (
+                <>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="text-sm font-semibold text-[#1e293b]">{metric.label}</div>
               <span
@@ -111,6 +154,7 @@ function CalculationCard({ title, subtitle, accent = "blue", metrics }: Calculat
             <div className="mt-2 text-xs leading-5 text-[#475569]">
               <div>
                 <span className="font-semibold text-[#334155]">Formula:</span> {metric.formula}
+                {source ? <FormulaSourceTags source={source} /> : null}
               </div>
               <div className="mt-1 font-mono text-[11px] text-[#0f172a]">
                 <span className="font-semibold text-[#334155] font-sans">Inputs:</span> {metric.inputs}
@@ -124,6 +168,9 @@ function CalculationCard({ title, subtitle, accent = "blue", metrics }: Calculat
                 </div>
               ) : null}
             </div>
+                </>
+              );
+            })()}
           </div>
         ))}
       </div>
@@ -167,11 +214,11 @@ function getTransporterLabel(site: string, route: string): string {
   }
 
   if (site === "hepatic_inlet") {
-    return "Iin,max";
+    return "Ih,total";
   }
 
   if (site === "hepatic_inlet_unbound") {
-    return "Iin,max,u";
+    return "Ih,u";
   }
 
   return "Cmax,u";
@@ -180,18 +227,18 @@ function getTransporterLabel(site: string, route: string): string {
 function getTransporterConcentration(
   site: string,
   route: string,
-  values: { cmaxUnbound: number; igut: number; iinMaxTotal: number; iinMaxUnbound: number },
+  values: { cmaxUnbound: number; igut: number; ihTotal: number; ihUnbound: number },
 ): number {
   if (site === "gut") {
     return route === "IV" ? values.cmaxUnbound : values.igut;
   }
 
   if (site === "hepatic_inlet") {
-    return values.iinMaxTotal;
+    return values.ihTotal;
   }
 
   if (site === "hepatic_inlet_unbound") {
-    return values.iinMaxUnbound;
+    return values.ihUnbound;
   }
 
   return values.cmaxUnbound;
@@ -288,14 +335,14 @@ export function SupportInfoTab() {
         result: fmtTxtNum(iinMaxTotal),
         formula: "Iin,max = Cmax,total + (Fa × Fg × Dose(μmol) × ka) / Qh",
         inputs: `${fmtExpr(cmaxTotal)} + (${fmtExpr(state.fa)} × ${fmtExpr(state.fg)} × ${fmtExpr(doseUmol)} × ${fmtExpr(state.kaMin)}) / ${fmtExpr(qh, 0)}`,
-        rule: isIv ? "For IV input the implementation returns Cmax,total directly." : "Used for hepatic inlet transporter assessments.",
+        rule: isIv ? "For IV input the implementation returns Cmax,total directly." : "Shown for reference; workbook-aligned transporter rows use the hepatic concentration outputs below.",
       },
       {
         label: "Iin,max,u (μM)",
         result: fmtTxtNum(iinMaxUnbound),
         formula: "Iin,max,u = Iin,max × fu,p",
         inputs: `${fmtExpr(iinMaxTotal)} × ${fmtExpr(state.fuP)}`,
-        rule: "Used for OATP1B1/1B3 and other hepatic inlet unbound transporter ratios.",
+        rule: "Shown for reference alongside the workbook-aligned hepatic unbound concentration used in report rows.",
       },
       {
         label: "Igut (μM)",
@@ -314,9 +361,9 @@ export function SupportInfoTab() {
       {
         label: "Ih,total (μM)",
         result: fmtTxtNum(ihTotal),
-        formula: "Ih,total = Cmax,total + (Fa × Fg × ka × Dose(μmol)) / (Qh × Rb)",
-        inputs: `${fmtExpr(cmaxTotal)} + (${fmtExpr(state.fa)} × ${fmtExpr(state.fg)} × ${fmtExpr(state.kaMin)} × ${fmtExpr(doseUmol)}) / (${fmtExpr(qh, 0)} × ${fmtExpr(rb)})`,
-        rule: isIv ? "For IV route the implementation returns Cmax,total directly." : "Intermediate hepatic inlet concentration before fu,p correction.",
+        formula: "Ih,total = Cmax,total + (Fa × Fg × ka × Dose(μmol) / (Qh × Rb)) × 1000",
+        inputs: `${fmtExpr(cmaxTotal)} + ((${fmtExpr(state.fa)} × ${fmtExpr(state.fg)} × ${fmtExpr(state.kaMin)} × ${fmtExpr(doseUmol)}) / (${fmtExpr(qh, 0)} × ${fmtExpr(rb)})) × 1000`,
+        rule: isIv ? "For IV route the implementation returns Cmax,total directly." : "Primary hepatic concentration used by workbook-aligned transporter and CYP liver calculations.",
       },
       {
         label: "Ih,u (μM)",
@@ -368,8 +415,9 @@ export function SupportInfoTab() {
       const altR1 = isCyp3A4 ? calcR1(igut, ki) : NaN;
       const altIKi = Number.isNaN(altR1) ? NaN : altR1 - 1;
       const scaledTdiI = 5 * cmaxUnbound;
-      const r2 = calcTdiAucRatio(scaledTdiI, KI, kinact, kdeg);
-      const scaledInductionI = 10 * cmaxTotal;
+      const tdiDenominator = getTier1TdiDenominator(KI, EC50, Emax);
+      const r2 = calcTdiAucRatio(scaledTdiI, tdiDenominator, kinact, kdeg);
+      const scaledInductionI = 10 * cmaxUnbound;
       const r3 = calcR3(scaledInductionI, Emax, EC50, dScalar as number);
 
       const metrics: MetricDetail[] = [
@@ -384,15 +432,16 @@ export function SupportInfoTab() {
         {
           label: "R2",
           result: fmtTxtNum(r2),
-          formula: "R2 = 1 + kinact × (5 × Cmax,u) / (kdeg × (5 × Cmax,u + KI))",
-          inputs: `1 + ${fmtExpr(kinact)} × ${fmtExpr(scaledTdiI)} / (${fmtExpr(kdeg, 5)} × (${fmtExpr(scaledTdiI)} + ${fmtExpr(KI)}))`,
+          formula: "R2 = 1 + kinact × (5 × Cmax,u) / (kdeg × (5 × Cmax,u + Kt))",
+          inputs: `1 + ${fmtExpr(kinact)} × ${fmtExpr(scaledTdiI)} / (${fmtExpr(kdeg, 5)} × (${fmtExpr(scaledTdiI)} + ${fmtExpr(tdiDenominator)}))`,
           rule: `${formatBoolRisk(!Number.isNaN(r2) && r2 >= 1.25)}; threshold is ≥ 1.25.`,
-          tone: riskTone(!Number.isNaN(r2) && r2 >= 1.25),
+            source: AGENT_GUIDANCE_SOURCE,
+            tone: riskTone(!Number.isNaN(r2) && r2 >= 1.25),
         },
         {
           label: "R3",
           result: noInduction ? "N/M" : fmtTxtNum(r3),
-          formula: "R3 = 1 / (1 + d × Emax × (10 × Cmax,total) / (10 × Cmax,total + EC50))",
+          formula: "R3 = 1 / (1 + d × Emax × (10 × Cmax,u) / (10 × Cmax,u + EC50))",
           inputs: noInduction
             ? "Induction not assessed for this enzyme."
             : `1 / (1 + ${fmtExpr(dScalar)} × ${fmtExpr(Emax)} × ${fmtExpr(scaledInductionI)} / (${fmtExpr(scaledInductionI)} + ${fmtExpr(EC50)}))`,
@@ -416,10 +465,11 @@ export function SupportInfoTab() {
         title: enzyme.enzyme,
         subtitle: "CYP Tier 1 basic model output explanation",
         accent: isCyp3A4 ? "amber" as const : "blue" as const,
+        defaultSource: ORIGINAL_R_SOURCE,
         metrics,
       };
     });
-  }, [cmaxTotal, cmaxUnbound, igut, isIv, state.cypInputs, systemCypValues]);
+  }, [cmaxUnbound, igut, isIv, state.cypInputs, systemCypValues]);
 
   const optionalTier1Cards = useMemo(() => {
     return defaultOptional.map((opt) => {
@@ -433,6 +483,7 @@ export function SupportInfoTab() {
         title: inputs?.name?.trim() || `Optional enzyme ${opt.idx}`,
         subtitle: active ? "User-defined reversible inhibition check" : "Optional enzyme not configured",
         accent: active ? ("blue" as const) : ("amber" as const),
+        defaultSource: ORIGINAL_R_SOURCE,
         metrics: [
           {
             label: "[I]/Ki",
@@ -472,6 +523,7 @@ export function SupportInfoTab() {
           title: enzyme.enzyme,
           subtitle: "Tier 2 net-effect liver model",
           accent: netRisk ? ("amber" as const) : ("emerald" as const),
+          defaultSource: ORIGINAL_R_SOURCE,
           metrics: [
             {
               label: "A factor",
@@ -494,15 +546,16 @@ export function SupportInfoTab() {
               inputs: noInduction
                 ? "Induction not assessed for this enzyme."
                 : `1 + ${fmtExpr(dScalar)} × ${fmtExpr(Emax)} × ${fmtExpr(ihUnbound)} / (${fmtExpr(ihUnbound)} + ${fmtExpr(EC50)})`,
-              rule: noInduction ? "When unavailable, the implementation treats C as neutral (1.0) in net AUCR." : "Induction factor used inside the net-effect model.",
+              rule: noInduction ? "When induction is not assessed, the C term is omitted from the multiplicative effect term." : "Induction factor used inside the net-effect model.",
               tone: riskTone(false, noInduction),
             },
             {
               label: "Net AUCR",
               result: fmtTxtNum(net),
               formula: "AUCR = 1 / ((A × B × C) × fm + (1 - fm))",
-              inputs: `1 / ((${fmtExpr(A)} × ${fmtExpr(B)} × ${Number.isNaN(C) ? "1.000" : fmtExpr(C)}) × ${fmtExpr(fmVal)} + (1 - ${fmtExpr(fmVal)}))`,
+              inputs: `1 / ((${fmtExpr(A)} × ${fmtExpr(B)} × ${Number.isNaN(C) ? "---" : fmtExpr(C)}) × ${fmtExpr(fmVal)} + (1 - ${fmtExpr(fmVal)}))`,
               rule: `${formatBoolRisk(netRisk)}; report flags AUCR ≥ 1.25 or ≤ 0.8.`,
+              source: AGENT_GUIDANCE_SOURCE,
               tone: riskTone(netRisk),
             },
           ],
@@ -530,9 +583,11 @@ export function SupportInfoTab() {
       const Ah = calcReversibleFactor(ihUnbound, ki);
       const Bh = calcTdiFactor(ihUnbound, KI, kinact, kdegH);
       const Ch = calcInductionFactor(ihUnbound, Emax, EC50, dScalar as number);
-      const Ag = calcReversibleFactor(igut, ki);
-      const Bg = calcTdiFactor(igut, KI, kinact, kdegG);
-      const Cg = calcInductionFactor(igut, Emax, EC50, dScalar as number);
+      const Ag = calcReversibleFactor(ient, ki);
+      const Bg = calcTdiFactor(ient, KI, kinact, kdegG);
+      const Cg = calcInductionFactor(ient, Emax, EC50, dScalar as number);
+      const liverNet = calcHepaticNetAUCR(Ah, Bh, Ch, substrate.fm);
+      const gutNet = calcGutNetAUCR(Ag, Bg, Cg, fgVal);
       const net = calcCyp3a4CombinedAUCR(Ah, Bh, Ch, Ag, Bg, Cg, substrate.fm, fgVal);
       const netRisk = !Number.isNaN(net) && (net >= 1.25 || net <= 0.8);
 
@@ -540,6 +595,7 @@ export function SupportInfoTab() {
         title: substrate.title,
         subtitle: "CYP3A4 liver + gut combined net-effect model",
         accent: netRisk ? ("amber" as const) : ("emerald" as const),
+        defaultSource: ORIGINAL_R_SOURCE,
         metrics: [
           {
             label: "Liver factors",
@@ -551,13 +607,22 @@ export function SupportInfoTab() {
           {
             label: "Gut factors",
             result: isIv ? "N/A" : `A=${fmtTxtNum(Ag)} / B=${fmtTxtNum(Bg)} / C=${fmtTxtNum(Cg)}`,
-            formula: "Ag = 1/(1 + Igut/Ki); Bg = kdeg,g/(kdeg,g + kinact × Igut/(Igut + KI)); Cg = 1 + d × Emax × Igut/(Igut + EC50)",
+            formula: "Ag = 1/(1 + Ient/Ki); Bg = kdeg,g/(kdeg,g + kinact × Ient/(Ient + KI)); Cg = 1 + d × Emax × Ient/(Ient + EC50)",
             inputs: isIv
               ? "Route is IV, so Igut-based gut factors are not normally interpreted."
-              : `Igut=${fmtExpr(igut)}, Ki=${fmtExpr(ki)}, KI=${fmtExpr(KI)}, kinact=${fmtExpr(kinact)}, kdeg,g=${fmtExpr(kdegG, 5)}, Emax=${fmtExpr(Emax)}, EC50=${fmtExpr(EC50)}`,
-            rule: isIv ? "Gut factor display is informational only for IV route." : "These factors drive the gut AUCR term.",
+              : `Ient=${fmtExpr(ient)}, Ki=${fmtExpr(ki)}, KI=${fmtExpr(KI)}, kinact=${fmtExpr(kinact)}, kdeg,g=${fmtExpr(kdegG, 5)}, Emax=${fmtExpr(Emax)}, EC50=${fmtExpr(EC50)}`,
+            rule: isIv ? "Gut factor display is informational only for IV route." : "These factors drive the gut AUCR term in the workbook-aligned report.",
+            source: AGENT_GUIDANCE_SOURCE,
             tone: riskTone(false, isIv),
           },
+          {
+            label: "Regional AUCR",
+            result: `Liver=${fmtTxtNum(liverNet)} / Gut=${fmtTxtNum(gutNet)}`,
+            formula: "AUCRliver = 1 / ((Ah ¡Á Bh ¡Á Ch) ¡Á fm + (1 - fm)); AUCRgut = 1 / ((Ag ¡Á Bg ¡Á Cg) ¡Á (1 - Fg) + Fg)",
+            inputs: `fm=${fmtExpr(substrate.fm)}, Fg=${fmtExpr(fgVal)}`,
+              rule: "The report shows liver, gut, and combined outputs separately for CYP3A4 substrates.",
+              source: AGENT_GUIDANCE_SOURCE,
+            },
           {
             label: "Combined Net AUCR",
             result: fmtTxtNum(net),
@@ -569,7 +634,7 @@ export function SupportInfoTab() {
         ],
       };
     });
-  }, [fgVal, igut, ihUnbound, isIv, state.cypInputs, systemCypValues, systemOtherValues]);
+  }, [fgVal, ient, ihUnbound, isIv, state.cypInputs, systemCypValues, systemOtherValues]);
 
   const optionalTier2Cards = useMemo(() => {
     return defaultOptional.map((opt) => {
@@ -585,6 +650,7 @@ export function SupportInfoTab() {
         title: inputs?.name?.trim() || `Optional enzyme ${opt.idx}`,
         subtitle: active ? "Optional net-effect entry (reversible inhibition only)" : "Optional enzyme not configured",
         accent: active ? ("blue" as const) : ("amber" as const),
+        defaultSource: ORIGINAL_R_SOURCE,
         metrics: [
           {
             label: "A factor",
@@ -611,11 +677,14 @@ export function SupportInfoTab() {
     const sharedValues = {
       cmaxUnbound,
       igut,
-      iinMaxTotal,
-      iinMaxUnbound,
+      ihTotal,
+      ihUnbound,
     };
 
-    const standard = defaultTr.map((transporter, index) => {
+    const standard = defaultTr
+      .filter((transporter) => transporter.transporter !== "NTCP")
+      .map((transporter) => {
+      const index = defaultTr.findIndex((row) => row.transporter === transporter.transporter);
       const inputs = state.trInputs[index + 1];
       const ki = inputs?.ki ?? calcChengPrusoffKi(inputs?.ic50 ?? NaN, inputs?.s ?? NaN, inputs?.km ?? NaN);
       const I = getTransporterConcentration(transporter.site, route, sharedValues);
@@ -628,6 +697,7 @@ export function SupportInfoTab() {
         title: transporter.transporter,
         subtitle: `Standard transporter using ${getTransporterLabel(transporter.site, route)} as inhibitor concentration`,
         accent: risk ? ("amber" as const) : ("emerald" as const),
+        defaultSource: AGENT_GUIDANCE_SOURCE,
         metrics: [
           {
             label: "Ki,u",
@@ -637,6 +707,7 @@ export function SupportInfoTab() {
               ? `${fmtExpr(inputs?.ic50)} / (1 + ${fmtExpr(inputs?.s)} / ${fmtExpr(inputs?.km)})`
               : `Direct Ki,u = ${fmtExpr(inputs?.ki)}`,
             rule: kiDerivedFromIc50 ? "Cheng-Prusoff back-calculation is used when Ki is blank." : "Direct Ki overrides the Cheng-Prusoff estimate.",
+            source: ORIGINAL_R_SOURCE,
           },
           {
             label: "[I]/Ki,u",
@@ -670,6 +741,7 @@ export function SupportInfoTab() {
         title: name,
         subtitle: active ? `Optional transporter using ${getTransporterLabel(site, route)}` : "Optional transporter not configured",
         accent: active ? ("blue" as const) : ("amber" as const),
+        defaultSource: AGENT_GUIDANCE_SOURCE,
         metrics: [
           {
             label: "Ki,u",
@@ -681,6 +753,7 @@ export function SupportInfoTab() {
                 : `Direct Ki,u = ${fmtExpr(inputs?.ki)}`
               : "Configure name and inhibition inputs to enable this output.",
             rule: active ? "Direct Ki overrides Cheng-Prusoff when provided." : "No output is generated until the transporter is configured.",
+            source: ORIGINAL_R_SOURCE,
             tone: riskTone(false, !active),
           },
           {
@@ -700,7 +773,7 @@ export function SupportInfoTab() {
     });
 
     return { standard, optional };
-  }, [cmaxUnbound, igut, iinMaxTotal, iinMaxUnbound, isIv, route, state.optionalTrInputs, state.trInputs]);
+  }, [cmaxUnbound, igut, ihTotal, ihUnbound, isIv, route, state.optionalTrInputs, state.trInputs]);
 
   const strongestTdiMetric = useMemo(() => {
     const cyp3a4Entries = defaultCyp
@@ -723,6 +796,7 @@ export function SupportInfoTab() {
           formula: "Select the CYP3A4 substrate with the highest kinact / KI ratio",
           inputs: cyp3a4Entries.map((entry) => `${entry.enzyme}: ${fmtExpr(entry.kinact)} / ${fmtExpr(entry.KI)} = ${fmtExpr(entry.score, 5)}`).join(" | "),
           rule: "This matches the Intermediate Values summary widget.",
+          source: ORIGINAL_R_SOURCE,
         }
       : null;
   }, [state.cypInputs]);
@@ -784,7 +858,7 @@ export function SupportInfoTab() {
                   <CircleAlert className="mt-0.5 h-4 w-4 flex-shrink-0 text-[#2563eb]" />
                   <span>
                     `---` means the required upstream input is missing. `N/M` means that output is intentionally not assessed by the current model.
-                    Tier 1 CYP `R3` now uses <span className="font-semibold text-[#0f172a]">10 × Cmax,total</span> consistently with the calculation
+                    Tier 1 CYP `R3` now uses <span className="font-semibold text-[#0f172a]">10 × Cmax,u</span> consistently with the calculation
                     library and the explanatory formula shown below.
                   </span>
                 </div>
@@ -800,6 +874,7 @@ export function SupportInfoTab() {
                 subtitle="These values feed both CYP and transporter models."
                 accent="blue"
                 metrics={pkSupportMetrics}
+                defaultSource={ORIGINAL_R_SOURCE}
               />
               <CalculationCard
                 title="Intermediate summary logic"
@@ -816,7 +891,7 @@ export function SupportInfoTab() {
                   {
                     label: "Blood-to-plasma ratio (Rb/BP)",
                     result: fmtTxtNum(state.bp),
-                    formula: "Rb is applied only in Ih,total = Cmax,total + Fa × Fg × ka × Dose(μmol) / (Qh × Rb)",
+                    formula: "Rb is applied only in Ih,total = Cmax,total + (Fa × Fg × ka × Dose(μmol) / (Qh × Rb)) × 1000",
                     inputs: `Rb = ${fmtExpr(state.bp)}`,
                     rule: "If Rb is unavailable, Ih outputs become unavailable.",
                   },
@@ -826,8 +901,10 @@ export function SupportInfoTab() {
                     formula: "Select the CYP3A4 substrate with the highest kinact / KI ratio",
                     inputs: "No valid kinact/KI pair is currently available.",
                     rule: "The Intermediate Values widget stays blank until at least one valid pair exists.",
+                    source: ORIGINAL_R_SOURCE,
                   },
                 ]}
+                defaultSource={ORIGINAL_R_SOURCE}
               />
             </div>
           </section>
@@ -843,6 +920,7 @@ export function SupportInfoTab() {
                   subtitle={card.subtitle}
                   accent={card.accent}
                   metrics={card.metrics}
+                  defaultSource={card.defaultSource}
                 />
               ))}
             </div>
@@ -856,6 +934,7 @@ export function SupportInfoTab() {
                   subtitle={card.subtitle}
                   accent={card.accent}
                   metrics={card.metrics}
+                  defaultSource={card.defaultSource}
                 />
               ))}
             </div>
@@ -872,6 +951,7 @@ export function SupportInfoTab() {
                   subtitle={card.subtitle}
                   accent={card.accent}
                   metrics={card.metrics}
+                  defaultSource={card.defaultSource}
                 />
               ))}
             </div>
@@ -885,6 +965,7 @@ export function SupportInfoTab() {
                   subtitle={card.subtitle}
                   accent={card.accent}
                   metrics={card.metrics}
+                  defaultSource={card.defaultSource}
                 />
               ))}
             </div>
@@ -898,6 +979,7 @@ export function SupportInfoTab() {
                   subtitle={card.subtitle}
                   accent={card.accent}
                   metrics={card.metrics}
+                  defaultSource={card.defaultSource}
                 />
               ))}
             </div>
@@ -924,6 +1006,7 @@ export function SupportInfoTab() {
                   subtitle={card.subtitle}
                   accent={card.accent}
                   metrics={card.metrics}
+                  defaultSource={card.defaultSource}
                 />
               ))}
             </div>
@@ -937,6 +1020,7 @@ export function SupportInfoTab() {
                   subtitle={card.subtitle}
                   accent={card.accent}
                   metrics={card.metrics}
+                  defaultSource={card.defaultSource}
                 />
               ))}
             </div>

@@ -6,7 +6,8 @@ import {
   fmtTxtNum, calcR1, calcTdiAucRatio, calcR3,
   calcReversibleFactor, calcTdiFactor, calcInductionFactor,
   calcNetEffectAUCR, calcCyp3a4CombinedAUCR,
-  calcIhUnboundUM, getKdegH, getKdegG, getFmValue,
+  calcIEntUM, calcIhUnboundUM, calcGutNetAUCR, calcHepaticNetAUCR,
+  getKdegH, getKdegG, getFmValue, getTier1TdiDenominator,
 } from "@/lib/calculations";
 import { defaultCyp, defaultOptional } from "@/lib/data";
 import { downloadCsvReport, formatCsvExportFeedback, type CsvExportFeedback } from "@/lib/export";
@@ -51,6 +52,15 @@ export function ReportTab() {
   }
 
   const qh = state.systemCypInputs["Qh"]?.value ?? 1617;
+  const qent = state.systemCypInputs["Qent"]?.value ?? 300;
+  const ient = calcIEntUM(
+    state.doseMg ?? NaN,
+    state.mwValue,
+    state.kaMin ?? NaN,
+    state.fa ?? NaN,
+    qent,
+    route,
+  );
   const ihUnbound = calcIhUnboundUM(
     cmaxTotal, state.doseMg ?? NaN, state.mwValue,
     state.kaMin ?? NaN, state.fa ?? NaN, state.fg ?? NaN, qh, state.bp ?? NaN, state.fuP ?? NaN, route
@@ -87,11 +97,12 @@ export function ReportTab() {
       const altIKi = Number.isNaN(altR1) ? NaN : altR1 - 1;
 
       // TDI: R2 = (kobs + kdeg)/kdeg, [I] = 5 × Cmax,u (SF=5)
-      const r2 = calcTdiAucRatio(5 * cmaxUnbound, KI, kinact, kdeg);
+      const tdiDenominator = getTier1TdiDenominator(KI, EC50, Emax);
+      const r2 = calcTdiAucRatio(5 * cmaxUnbound, tdiDenominator, kinact, kdeg);
 
       // Induction: R3 = 1/(1 + d*Emax*10*Cmax,total/(10*Cmax,total + EC50))
       // [I] = 10 × Cmax,total (SF=10 for induction)
-      const r3 = calcR3(10 * cmaxTotal, Emax, EC50, dScalar as number);
+      const r3 = calcR3(10 * cmaxUnbound, Emax, EC50, dScalar as number);
 
       const noInduction = /CYP2A6|CYP2D6|CYP2E1/.test(e.enzyme);
 
@@ -113,7 +124,7 @@ export function ReportTab() {
         r3Txt: noInduction ? "N/M" : fmtTxtNum(r3),
       };
     });
-  }, [state.cypInputs, cmaxTotal, cmaxUnbound, igut, route, systemCypValues]);
+  }, [state.cypInputs, cmaxUnbound, igut, route, systemCypValues]);
 
   // ─── Tier 2 Data: Net Effect Model ────────────────────────────────────────
   const optionalTier1Rows = useMemo(() => {
@@ -189,18 +200,19 @@ export function ReportTab() {
     const mCh = calcInductionFactor(ihUnbound, mEmax, mEC50, mD as number);
 
     // Gut factors
-    const mAg = calcReversibleFactor(igut, mKi);
-    const mBg = calcTdiFactor(igut, mKI, mKinact, mKdegG);
-    const mCg = calcInductionFactor(igut, mEmax, mEC50, mD as number);
+    const mAg = calcReversibleFactor(ient, mKi);
+    const mBg = calcTdiFactor(ient, mKI, mKinact, mKdegG);
+    const mCg = calcInductionFactor(ient, mEmax, mEC50, mD as number);
 
-    // Combined AUCR
+    const mLiverNet = calcHepaticNetAUCR(mAh, mBh, mCh, fm3a4);
+    const mGutNet = calcGutNetAUCR(mAg, mBg, mCg, fgVal);
     const mNet = calcCyp3a4CombinedAUCR(mAh, mBh, mCh, mAg, mBg, mCg, fm3a4, fgVal);
 
     // Display values (R1, R2 decomposition)
     const mRev = calcR1(ihUnbound, mKi);
     const mTdiLiver = calcTdiAucRatio(ihUnbound, mKI, mKinact, mKdegH);
     const mRevGut = calcR1(igut, mKi);
-    const mTdiGut = calcTdiAucRatio(igut, mKI, mKinact, mKdegG);
+    const mTdiGut = calcTdiAucRatio(ient, mKI, mKinact, mKdegG);
 
     // ── CYP3A4: Testosterone ───────────────────────────────────────────
     const testo = defaultCyp.find(e => e.idBase === "CYP3A4_testosterone");
@@ -218,16 +230,18 @@ export function ReportTab() {
     const tAh = calcReversibleFactor(ihUnbound, tKi);
     const tBh = calcTdiFactor(ihUnbound, tKI, tKinact, tKdegH);
     const tCh = calcInductionFactor(ihUnbound, tEmax, tEC50, tD as number);
-    const tAg = calcReversibleFactor(igut, tKi);
-    const tBg = calcTdiFactor(igut, tKI, tKinact, tKdegG);
-    const tCg = calcInductionFactor(igut, tEmax, tEC50, tD as number);
+    const tAg = calcReversibleFactor(ient, tKi);
+    const tBg = calcTdiFactor(ient, tKI, tKinact, tKdegG);
+    const tCg = calcInductionFactor(ient, tEmax, tEC50, tD as number);
 
+    const tLiverNet = calcHepaticNetAUCR(tAh, tBh, tCh, fm3a4);
+    const tGutNet = calcGutNetAUCR(tAg, tBg, tCg, fgVal);
     const tNet = calcCyp3a4CombinedAUCR(tAh, tBh, tCh, tAg, tBg, tCg, fm3a4, fgVal);
 
     const tRev = calcR1(ihUnbound, tKi);
     const tTdiLiver = calcTdiAucRatio(ihUnbound, tKI, tKinact, tKdegH);
     const tRevGut = calcR1(igut, tKi);
-    const tTdiGut = calcTdiAucRatio(igut, tKI, tKinact, tKdegG);
+    const tTdiGut = calcTdiAucRatio(ient, tKI, tKinact, tKdegG);
 
     return {
       baseRows,
@@ -235,16 +249,16 @@ export function ReportTab() {
         ki: mKi, KI: mKI, kinact: mKinact, Emax: mEmax, EC50: mEC50,
         Ah: mAh, Bh: mBh, Ch: mCh, Ag: mAg, Bg: mBg, Cg: mCg,
         rev: mRev, tdiLiver: mTdiLiver, revGut: mRevGut, tdiGut: mTdiGut,
-        net: mNet,
+        liverNet: mLiverNet, gutNet: mGutNet, net: mNet,
       },
       testo: {
         ki: tKi, KI: tKI, kinact: tKinact, Emax: tEmax, EC50: tEC50,
         Ah: tAh, Bh: tBh, Ch: tCh, Ag: tAg, Bg: tBg, Cg: tCg,
         rev: tRev, tdiLiver: tTdiLiver, revGut: tRevGut, tdiGut: tTdiGut,
-        net: tNet,
+        liverNet: tLiverNet, gutNet: tGutNet, net: tNet,
       },
     };
-  }, [state.cypInputs, ihUnbound, igut, systemCypValues, systemOtherValues, fgVal]);
+  }, [state.cypInputs, ihUnbound, ient, igut, systemCypValues, systemOtherValues, fgVal]);
 
   const optionalTier2Rows = useMemo(() => {
     return defaultOptional.map((opt) => {
@@ -356,7 +370,7 @@ export function ReportTab() {
             fmtTxtNum(tier2Data.midaz.Ah),
             fmtTxtNum(tier2Data.midaz.Bh),
             fmtTxtNum(tier2Data.midaz.Ch),
-            "---",
+            fmtTxtNum(tier2Data.midaz.liverNet),
             "---",
           ],
           [
@@ -370,7 +384,7 @@ export function ReportTab() {
             fmtTxtNum(tier2Data.midaz.Ag),
             fmtTxtNum(tier2Data.midaz.Bg),
             fmtTxtNum(tier2Data.midaz.Cg),
-            "---",
+            fmtTxtNum(tier2Data.midaz.gutNet),
             "---",
           ],
           [
@@ -398,7 +412,7 @@ export function ReportTab() {
             fmtTxtNum(tier2Data.testo.Ah),
             fmtTxtNum(tier2Data.testo.Bh),
             fmtTxtNum(tier2Data.testo.Ch),
-            "---",
+            fmtTxtNum(tier2Data.testo.liverNet),
             "---",
           ],
           [
@@ -412,7 +426,7 @@ export function ReportTab() {
             fmtTxtNum(tier2Data.testo.Ag),
             fmtTxtNum(tier2Data.testo.Bg),
             fmtTxtNum(tier2Data.testo.Cg),
-            "---",
+            fmtTxtNum(tier2Data.testo.gutNet),
             "---",
           ],
           [
@@ -653,7 +667,7 @@ export function ReportTab() {
                     <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#3b82f6] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.midaz.Ah)}</td>
                     <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#3b82f6] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.midaz.Bh)}</td>
                     <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#3b82f6] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.midaz.Ch)}</td>
-                    <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#94a3b8] border-b border-[#f1f5f9]">---</td>
+                    <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#0f172a] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.midaz.liverNet)}</td>
                   </tr>
                   {/* Midazolam Gut */}
                   <tr className="hover:bg-[#f8fafc]">
@@ -662,7 +676,7 @@ export function ReportTab() {
                     <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#d97706] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.midaz.Ag)}</td>
                     <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#d97706] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.midaz.Bg)}</td>
                     <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#d97706] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.midaz.Cg)}</td>
-                    <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#94a3b8] border-b border-[#f1f5f9]">---</td>
+                    <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#0f172a] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.midaz.gutNet)}</td>
                   </tr>
                   {/* Midazolam Combined */}
                   <tr className="bg-[#eff6ff] hover:bg-[#dbeafe]">
@@ -682,7 +696,7 @@ export function ReportTab() {
                     <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#3b82f6] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.testo.Ah)}</td>
                     <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#3b82f6] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.testo.Bh)}</td>
                     <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#3b82f6] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.testo.Ch)}</td>
-                    <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#94a3b8] border-b border-[#f1f5f9]">---</td>
+                    <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#0f172a] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.testo.liverNet)}</td>
                   </tr>
                   {/* Testosterone Gut */}
                   <tr className="hover:bg-[#f8fafc]">
@@ -691,7 +705,7 @@ export function ReportTab() {
                     <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#d97706] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.testo.Ag)}</td>
                     <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#d97706] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.testo.Bg)}</td>
                     <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#d97706] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.testo.Cg)}</td>
-                    <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#94a3b8] border-b border-[#f1f5f9]">---</td>
+                    <td className="px-2 py-1.5 text-[12px] text-center font-mono text-[#0f172a] border-b border-[#f1f5f9]">{fmtTxtNum(tier2Data.testo.gutNet)}</td>
                   </tr>
                   {/* Testosterone Combined */}
                   <tr className="bg-[#eff6ff] hover:bg-[#dbeafe]">
