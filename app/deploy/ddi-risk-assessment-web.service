@@ -1,0 +1,14 @@
+[Unit]
+Description=DDI Risk Assessment Website
+
+[Service]
+Type=simple
+WorkingDirectory=%h/apps/ddi-risk-assessment/current
+Environment=HOST=0.0.0.0
+Environment=PORT=3002
+ExecStart=%h/.local/bin/node %h/apps/ddi-risk-assessment/current/deploy/static-server.mjs
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
