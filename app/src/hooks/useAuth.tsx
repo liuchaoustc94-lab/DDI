@@ -94,7 +94,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const account = localAccounts.find((item) => item.username === normalizedUsername && item.password === password);
 
     if (!account) {
-      return { ok: false, message: "账号或密码错误，请重新验证。" };
+      return { ok: false, message: "Incorrect username or password. Please try again." };
     }
 
     const nextUser: AuthUser = {

@@ -817,11 +817,12 @@ export function SupportInfoTab() {
                     Support Information
                   </div>
                   <h2 className="mt-4 text-3xl font-semibold tracking-tight text-[#0f172a]">
-                    每个输出值的计算路径都在这里。
+                    See how each output is calculated.
                   </h2>
                   <p className="mt-3 max-w-2xl text-sm leading-7 text-[#475569]">
-                    这个模块会跟随当前输入实时更新，逐项说明公式、代入值、阈值和特殊规则。页面里的所有说明都复用当前 assessment
-                    页面正在使用的计算链，不是额外手写的静态备注。
+                    This module updates with your inputs and explains the formulas, substituted values,
+                    thresholds, and special rules. Every explanation follows the calculation workflow
+                    used by the current assessment, rather than separate static notes.
                   </p>
                 </div>
                 <div className="rounded-2xl border border-white/70 bg-white/80 p-4 shadow-sm backdrop-blur-sm">

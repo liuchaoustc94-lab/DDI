@@ -33,13 +33,11 @@ export default function Home() {
             </div>
             <div className="flex flex-col items-end gap-3 sm:flex-row sm:items-center">
               <div className="rounded-[1.2rem] border border-white/75 bg-white/82 px-4 py-3 shadow-sm backdrop-blur">
-                <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.24em] text-[#64748b]">
-                  云顶新耀
-                </div>
                 <img
                   src="/everest-medicines-logo-ch.png"
-                  alt="云顶新耀 Everest Medicines"
+                  alt="Everest Medicines"
                   className="h-10 w-auto object-contain sm:h-11"
+                  style={{ clipPath: "inset(0 0 25% 0)" }}
                 />
               </div>
               <div className="rounded-full border border-white/70 bg-white/70 px-4 py-2 text-xs font-semibold uppercase tracking-[0.24em] text-[#0f766e] shadow-sm backdrop-blur">

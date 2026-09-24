@@ -22,9 +22,9 @@ function getRedirectTarget(search: string) {
 
 function VerificationShowcase() {
   const accessRules = [
-    "登录前先完成用户身份校验。",
-    "验证通过后开放 DDI 工作区。",
-    "平台内支持参数录入、结果查看与报告导出。",
+    "Verify your identity before signing in.",
+    "Sign in to access the DDI workspace.",
+    "Enter parameters, review results, and export reports.",
   ];
 
   return (
@@ -40,12 +40,12 @@ function VerificationShowcase() {
 
         <div className="mt-6 grid gap-5 md:grid-cols-[minmax(0,1.05fr)_240px] md:items-start">
           <div>
-            <h1 className="max-w-[10ch] text-5xl font-semibold leading-[0.96] tracking-[-0.05em]">
-              登录验证通过后，进入 DDI 工作区。
+            <h1 className="max-w-[15ch] text-5xl font-semibold leading-[0.96] tracking-[-0.05em]">
+              Sign in to open the DDI workspace.
             </h1>
             <p className="mt-5 max-w-[34ch] text-[15px] leading-7 text-[#d7e4f8]">
-              平台访问入口采用用户验证控制。通过账号校验后，可进入 DDI Risk Assessment
-              工作区，继续参数录入、风险评估与报告导出。
+              Sign in to access the DDI Risk Assessment workspace for parameter entry, risk
+              assessment, and report export.
             </p>
           </div>
 
@@ -76,7 +76,7 @@ function VerificationShowcase() {
                 Verification Flow
               </div>
               <div className="mt-1 text-sm text-[#c8d7ee]">
-                身份校验激活后进入受保护平台内容。
+                Identity verification grants access to the protected workspace.
               </div>
             </div>
             <div className="rounded-full border border-white/10 bg-[#102848]/90 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-[#bfdbfe]">
@@ -103,7 +103,7 @@ function VerificationShowcase() {
               </div>
               <div className="mt-2 text-base font-semibold">Platform Request</div>
               <div className="mt-2 text-sm leading-6 text-[#c8d7ee]">
-                用户发起进入平台请求。
+                The user requests access to the platform.
               </div>
             </div>
 
@@ -127,7 +127,7 @@ function VerificationShowcase() {
               </div>
               <div className="mt-2 text-base font-semibold">Protected Workspace</div>
               <div className="mt-2 text-sm leading-6 text-[#c8d7ee]">
-                验证通过后开放工作区内容。
+                Successful verification unlocks the workspace.
               </div>
             </div>
 
@@ -145,7 +145,7 @@ function VerificationShowcase() {
 export default function Login() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { login, isAuthenticated, demoCredentials } = useAuth();
+  const { login, isAuthenticated } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -164,7 +164,7 @@ export default function Login() {
 
     const result = login(username, password);
     if (!result.ok) {
-      setError(result.message ?? "验证失败。");
+      setError(result.message ?? "Verification failed.");
       return;
     }
 
@@ -186,7 +186,7 @@ export default function Login() {
               className="inline-flex w-fit items-center gap-2 rounded-full border border-[#cbd5e1] bg-white/70 px-4 py-2 text-sm text-[#334155] shadow-sm backdrop-blur transition-colors hover:bg-white"
             >
               <ArrowLeft className="h-4 w-4" />
-              返回首页
+              Back to Home
             </button>
 
             <VerificationShowcase />
@@ -204,27 +204,25 @@ export default function Login() {
                   </div>
                 </div>
                 <div className="rounded-[1.2rem] border border-[#dbeafe] bg-[#f8fbff] px-4 py-3">
-                  <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.24em] text-[#64748b]">
-                    云顶新耀
-                  </div>
                   <img
                     src="/everest-medicines-logo-ch.png"
-                    alt="云顶新耀 Everest Medicines"
+                    alt="Everest Medicines"
                     className="h-11 w-auto object-contain"
+                    style={{ clipPath: "inset(0 0 25% 0)" }}
                   />
                 </div>
               </div>
 
               <form className="mt-8 space-y-5" onSubmit={handleSubmit}>
                 <label className="block">
-                  <div className="mb-2 text-sm font-semibold text-[#334155]">账号</div>
+                  <div className="mb-2 text-sm font-semibold text-[#334155]">Username</div>
                   <div className="flex items-center gap-3 rounded-2xl border border-[#cbd5e1] bg-[#f8fafc] px-4 py-3 shadow-sm focus-within:border-[#2563eb] focus-within:bg-white">
                     <UserRound className="h-4 w-4 text-[#64748b]" />
                     <input
                       type="text"
                       value={username}
                       onChange={(event) => setUsername(event.target.value)}
-                      placeholder="请输入用户名"
+                      placeholder="Enter username"
                       className="w-full border-0 bg-transparent text-sm text-[#0f172a] outline-none placeholder:text-[#94a3b8]"
                       autoComplete="username"
                     />
@@ -232,14 +230,14 @@ export default function Login() {
                 </label>
 
                 <label className="block">
-                  <div className="mb-2 text-sm font-semibold text-[#334155]">密码</div>
+                  <div className="mb-2 text-sm font-semibold text-[#334155]">Password</div>
                   <div className="flex items-center gap-3 rounded-2xl border border-[#cbd5e1] bg-[#f8fafc] px-4 py-3 shadow-sm focus-within:border-[#2563eb] focus-within:bg-white">
                     <LockKeyhole className="h-4 w-4 text-[#64748b]" />
                     <input
                       type="password"
                       value={password}
                       onChange={(event) => setPassword(event.target.value)}
-                      placeholder="请输入密码"
+                      placeholder="Enter password"
                       className="w-full border-0 bg-transparent text-sm text-[#0f172a] outline-none placeholder:text-[#94a3b8]"
                       autoComplete="current-password"
                     />
@@ -252,20 +250,11 @@ export default function Login() {
                   </div>
                 )}
 
-                <div className="rounded-[1.4rem] border border-[#dbeafe] bg-[#eff6ff] px-4 py-4 text-sm text-[#1d4ed8]">
-                  当前为本地验证模式。登录成功后才可进入平台内页。
-                  {demoCredentials && (
-                    <div className="mt-2 font-mono text-[13px] text-[#0f172a]">
-                      测试账号: {demoCredentials.username} / {demoCredentials.password}
-                    </div>
-                  )}
-                </div>
-
                 <button
                   type="submit"
                   className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-[#0f172a] px-6 py-4 text-sm font-semibold text-white shadow-lg shadow-[#0f172a]/20 transition-transform duration-200 hover:-translate-y-0.5 hover:bg-[#1e293b]"
                 >
-                  验证并登录平台
+                  Verify and Sign In
                   <ArrowRight className="h-4 w-4" />
                 </button>
               </form>
